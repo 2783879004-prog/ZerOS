@@ -415,7 +415,7 @@ class TaskbarManager {
             `;
         }
         
-        // 添加右侧系统组件（从左到右：网络、电池、时间、电源）
+        // 添加右侧系统组件（从左到右：网络、电池、时间、通知、电源）
         const networkDisplay = TaskbarManager._createNetworkDisplay();
         rightContainer.appendChild(networkDisplay);
         
@@ -424,6 +424,10 @@ class TaskbarManager {
         
         const timeDisplay = TaskbarManager._createTimeDisplay();
         rightContainer.appendChild(timeDisplay);
+        
+        // 添加通知按钮（在电源按钮之前）
+        const notificationButton = TaskbarManager._createNotificationButton();
+        rightContainer.appendChild(notificationButton);
         
         const powerButton = TaskbarManager._createPowerButton();
         rightContainer.appendChild(powerButton);
@@ -977,14 +981,20 @@ class TaskbarManager {
             // 创建程序列表容器（默认折叠）
             const categoryPrograms = document.createElement('div');
             categoryPrograms.className = 'taskbar-app-menu-category-programs';
-            categoryPrograms.style.display = 'none'; // 默认折叠
+            
+            // 创建内容包装器（用于 grid 布局）
+            const programsWrapper = document.createElement('div');
+            programsWrapper.className = 'taskbar-app-menu-category-programs-wrapper';
+            programsWrapper.style.cssText = 'min-height: 0; overflow: hidden;';
             
             // 渲染该类别下的程序
             for (const program of programs) {
                 const isRunning = runningPrograms.has(program.name);
                 const programItem = TaskbarManager._createAppMenuItem(program, isRunning);
-                categoryPrograms.appendChild(programItem);
+                programsWrapper.appendChild(programItem);
             }
+            
+            categoryPrograms.appendChild(programsWrapper);
             
             // 点击标题展开/折叠
             categoryHeader.addEventListener('click', (e) => {
@@ -999,20 +1009,13 @@ class TaskbarManager {
                 const isExpanded = categoryHeader.classList.contains('expanded');
                 if (isExpanded) {
                     // 折叠当前类别
-                    let collapseDuration = 400; // 默认时长
-                    if (typeof AnimateManager !== 'undefined') {
-                        const config = AnimateManager.addAnimationClasses(categoryPrograms, 'CATEGORY', 'COLLAPSE');
-                        collapseDuration = config ? config.duration : 400;
-                    }
                     categoryPrograms.classList.remove('show');
-                    // 等待动画完成后再隐藏
+                    // 等待动画完成（300ms）
                     setTimeout(() => {
-                        categoryPrograms.style.display = 'none';
-                        categoryPrograms.style.maxHeight = '0';
                         if (typeof AnimateManager !== 'undefined') {
                             AnimateManager.removeAnimationClasses(categoryPrograms);
                         }
-                    }, collapseDuration);
+                    }, 300);
                     categoryHeader.classList.remove('expanded');
                     expandIcon.style.transform = 'rotate(0deg)';
                 } else {
@@ -1039,23 +1042,14 @@ class TaskbarManager {
                                 otherIcon.style.transform = 'rotate(0deg)';
                             }
                             
-                            // 添加折叠动画
-                            let collapseDuration = 300; // 默认时长
-                            if (typeof AnimateManager !== 'undefined') {
-                                const config = AnimateManager.addAnimationClasses(otherPrograms, 'CATEGORY', 'COLLAPSE');
-                                collapseDuration = config ? (config.duration || 300) : 300;
-                            }
-                            
-                            // 等待动画完成后再隐藏
+                            // 等待动画完成（300ms）
                             const collapsePromise = new Promise(resolve => {
                                 setTimeout(() => {
-                                    otherPrograms.style.display = 'none';
-                                    otherPrograms.style.maxHeight = '0';
                                     if (typeof AnimateManager !== 'undefined') {
                                         AnimateManager.removeAnimationClasses(otherPrograms);
                                     }
                                     resolve();
-                                }, collapseDuration);
+                                }, 300);
                             });
                             collapsePromises.push(collapsePromise);
                         }
@@ -1063,31 +1057,15 @@ class TaskbarManager {
                     
                     // 等待所有折叠动画完成后再展开当前类别
                     Promise.all(collapsePromises).then(() => {
-                        // 展开当前类别
-                        categoryPrograms.style.display = 'block';
-                        categoryPrograms.style.maxHeight = 'none';
-                        
-                        // 强制重排以触发动画
-                        void categoryPrograms.offsetHeight;
-                        
                         // 使用 requestAnimationFrame 确保 DOM 更新完成
                         requestAnimationFrame(() => {
-                            // 添加展开动画
-                            if (typeof AnimateManager !== 'undefined') {
-                                AnimateManager.addAnimationClasses(categoryPrograms, 'CATEGORY', 'EXPAND');
-                            }
-                            
-                            // 再次使用 requestAnimationFrame 确保动画已开始
-                            requestAnimationFrame(() => {
-                                categoryPrograms.classList.add('show');
-                                categoryHeader.classList.add('expanded');
-                                expandIcon.style.transform = 'rotate(90deg)';
-                            });
+                            // 展开当前类别
+                            categoryPrograms.classList.add('show');
+                            categoryHeader.classList.add('expanded');
+                            expandIcon.style.transform = 'rotate(90deg)';
                         });
                     }).catch(() => {
                         // 如果 Promise.all 失败，直接展开（降级方案）
-                        categoryPrograms.style.display = 'block';
-                        categoryPrograms.style.maxHeight = 'none';
                         categoryPrograms.classList.add('show');
                         categoryHeader.classList.add('expanded');
                         expandIcon.style.transform = 'rotate(90deg)';
@@ -1106,29 +1084,15 @@ class TaskbarManager {
             const firstHeader = firstSection.querySelector('.taskbar-app-menu-category-header');
             const firstPrograms = firstSection.querySelector('.taskbar-app-menu-category-programs');
             if (firstHeader && firstPrograms) {
-                // 设置显示状态
-                firstPrograms.style.display = 'block';
-                firstPrograms.style.maxHeight = 'none';
-                
-                // 强制重排以触发动画
-                void firstPrograms.offsetHeight;
-                
                 // 使用 requestAnimationFrame 确保 DOM 更新完成
                 requestAnimationFrame(() => {
-                    // 添加展开动画
-                    if (typeof AnimateManager !== 'undefined') {
-                        AnimateManager.addAnimationClasses(firstPrograms, 'CATEGORY', 'EXPAND');
+                    // 展开第一个类别
+                    firstPrograms.classList.add('show');
+                    firstHeader.classList.add('expanded');
+                    const firstIcon = firstHeader.querySelector('.taskbar-app-menu-category-icon');
+                    if (firstIcon) {
+                        firstIcon.style.transform = 'rotate(90deg)';
                     }
-                    
-                    // 再次使用 requestAnimationFrame 确保动画已开始
-                    requestAnimationFrame(() => {
-                        firstPrograms.classList.add('show');
-                        firstHeader.classList.add('expanded');
-                        const firstIcon = firstHeader.querySelector('.taskbar-app-menu-category-icon');
-                        if (firstIcon) {
-                            firstIcon.style.transform = 'rotate(90deg)';
-                        }
-                    });
                 });
             }
         }
@@ -5232,6 +5196,102 @@ class TaskbarManager {
                 `;
             }
         }
+    }
+    
+    /**
+     * 创建通知按钮
+     * @returns {HTMLElement} 按钮元素
+     */
+    static _createNotificationButton() {
+        const iconContainer = document.createElement('div');
+        iconContainer.className = 'taskbar-icon taskbar-notification-button';
+        iconContainer.dataset.notificationButton = 'true';
+        iconContainer.style.position = 'relative';
+        
+        // 创建图标
+        const icon = document.createElement('div');
+        icon.className = 'notification-button-icon';
+        icon.innerHTML = '🔔';
+        icon.style.cssText = `
+            font-size: 20px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            width: 100%;
+            height: 100%;
+        `;
+        iconContainer.appendChild(icon);
+        
+        // 创建通知数量徽章
+        const badge = document.createElement('div');
+        badge.className = 'notification-badge';
+        badge.style.cssText = `
+            position: absolute;
+            top: 4px;
+            right: 4px;
+            background: #ec4141;
+            color: #ffffff;
+            font-size: 10px;
+            font-weight: bold;
+            min-width: 16px;
+            height: 16px;
+            border-radius: 8px;
+            display: none;
+            align-items: center;
+            justify-content: center;
+            padding: 0 4px;
+            box-sizing: border-box;
+            z-index: 10;
+        `;
+        iconContainer.appendChild(badge);
+        
+        // 添加工具提示
+        const tooltip = document.createElement('div');
+        tooltip.className = 'taskbar-icon-tooltip';
+        tooltip.textContent = '通知';
+        iconContainer.appendChild(tooltip);
+        
+        // 更新通知数量
+        const updateBadge = () => {
+            if (typeof NotificationManager !== 'undefined') {
+                const count = NotificationManager.getNotificationCount();
+                if (count > 0) {
+                    badge.textContent = count > 99 ? '99+' : count.toString();
+                    badge.style.display = 'flex';
+                } else {
+                    badge.style.display = 'none';
+                }
+            }
+        };
+        
+        // 初始更新
+        updateBadge();
+        
+        // 定期更新通知数量
+        const badgeUpdateInterval = setInterval(updateBadge, 1000);
+        
+        // 点击事件：切换通知栏
+        iconContainer.addEventListener('click', (e) => {
+            e.stopPropagation();
+            KernelLogger.debug("TaskbarManager", "通知按钮被点击");
+            if (typeof NotificationManager !== 'undefined') {
+                NotificationManager.toggleNotificationContainer();
+                KernelLogger.debug("TaskbarManager", "已调用 NotificationManager.toggleNotificationContainer()");
+            } else {
+                KernelLogger.warn("TaskbarManager", "NotificationManager 不可用");
+            }
+        });
+        
+        // 添加鼠标悬停效果
+        iconContainer.addEventListener('mouseenter', () => {
+            iconContainer.style.cursor = 'pointer';
+        });
+        
+        // 保存更新函数引用，以便在按钮被移除时清理
+        iconContainer._badgeUpdateInterval = badgeUpdateInterval;
+        iconContainer._updateBadge = updateBadge;
+        
+        return iconContainer;
     }
     
     /**

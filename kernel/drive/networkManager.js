@@ -45,6 +45,10 @@
             // 初始化 Service Worker
             this._initServiceWorker();
             
+            // 始终拦截网络请求（无论是否使用 Service Worker）
+            this._interceptFetch();
+            this._interceptXMLHttpRequest();
+            
             // 初始化网络状态监控
             this._initNetworkStateMonitoring();
             
@@ -126,6 +130,21 @@
                     this._handleServiceWorkerMessage(event);
                 });
                 
+                // 初始化时通知 Service Worker 当前网络状态
+                if (this.serviceWorker) {
+                    this._notifyServiceWorkerNetworkState(this.networkEnabled);
+                } else {
+                    // 如果 Service Worker 还未激活，等待激活后再通知
+                    const checkAndNotify = () => {
+                        if (this.serviceWorker) {
+                            this._notifyServiceWorkerNetworkState(this.networkEnabled);
+                        } else {
+                            setTimeout(checkAndNotify, 100);
+                        }
+                    };
+                    setTimeout(checkAndNotify, 100);
+                }
+                
                 this.isRegistered = true;
                 
                 if (typeof KernelLogger !== 'undefined') {
@@ -147,43 +166,45 @@
         
         /**
          * 初始化降级模式（不使用 Service Worker）
-         * 在降级模式下，通过拦截全局 fetch API 来实现网络请求监控
+         * 在降级模式下，通过拦截全局 fetch API 和 XMLHttpRequest 来实现网络请求监控
          */
         _initFallbackMode() {
-            // 在降级模式下，直接拦截 fetch API
-            if (typeof window !== 'undefined' && window.fetch) {
-                const originalFetch = window.fetch;
-                const self = this;
+            // 始终拦截 fetch API（无论是否使用 Service Worker）
+            this._interceptFetch();
+            
+            // 拦截 XMLHttpRequest
+            this._interceptXMLHttpRequest();
+            
+            if (typeof KernelLogger !== 'undefined') {
+                KernelLogger.info("NetworkManager", "已启用网络请求拦截（fetch 和 XMLHttpRequest）");
+            } else {
+                console.log('[内核][NetworkManager] 已启用网络请求拦截（fetch 和 XMLHttpRequest）');
+            }
+        }
+        
+        /**
+         * 拦截全局 fetch API
+         */
+        _interceptFetch() {
+            if (typeof window === 'undefined' || !window.fetch) {
+                return;
+            }
+            
+            const originalFetch = window.fetch;
+            const self = this;
+            
+            window.fetch = function(...args) {
+                const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : String(args[0]));
+                const options = args[1] || {};
                 
-                window.fetch = function(...args) {
-                    const url = typeof args[0] === 'string' ? args[0] : (args[0] && args[0].url ? args[0].url : String(args[0]));
-                    const options = args[1] || {};
-                    
-                    // 只处理 HTTP/HTTPS 请求
-                    if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
-                        return originalFetch.apply(this, args);
-                    }
-                    
-                    // 检查网络是否被禁用
-                    if (!self.networkEnabled) {
-                        // 记录被拒绝的请求
-                        self._handleInterceptedRequest({
-                            url: url,
-                            method: options.method || 'GET',
-                            headers: options.headers || {},
-                            body: options.body || null
-                        });
-                        
-                        self._handleRequestFailed({
-                            url: url,
-                            error: 'Network is disabled'
-                        });
-                        
-                        // 返回拒绝的 Promise
-                        return Promise.reject(new Error('Network is disabled by NetworkManager'));
-                    }
-                    
-                    // 记录请求
+                // 只处理 HTTP/HTTPS 请求
+                if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+                    return originalFetch.apply(this, args);
+                }
+                
+                // 检查网络是否被禁用
+                if (!self.networkEnabled) {
+                    // 记录被拒绝的请求
                     self._handleInterceptedRequest({
                         url: url,
                         method: options.method || 'GET',
@@ -191,41 +212,154 @@
                         body: options.body || null
                     });
                     
-                    // 执行原始 fetch
-                    return originalFetch.apply(this, args)
-                        .then(response => {
-                            // 异步记录响应（不阻塞响应返回）
-                            response.clone().text().then(body => {
-                                self._handleResponseReceived({
-                                    url: url,
-                                    status: response.status,
-                                    statusText: response.statusText,
-                                    headers: Object.fromEntries(response.headers.entries()),
-                                    body: body.substring(0, 1000), // 只记录前1000字符
-                                    size: new Blob([body]).size
-                                });
-                            }).catch(() => {
-                                // 忽略错误
-                            });
-                            
-                            return response;
-                        })
-                        .catch(error => {
-                            // 记录失败
-                            self._handleRequestFailed({
+                    self._handleRequestFailed({
+                        url: url,
+                        error: 'Network is disabled by NetworkManager'
+                    });
+                    
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.warn("NetworkManager", `网络请求被拒绝: ${url} (网络已禁用)`);
+                    }
+                    
+                    // 返回拒绝的 Promise
+                    return Promise.reject(new Error('Network is disabled by NetworkManager'));
+                }
+                
+                // 记录请求
+                self._handleInterceptedRequest({
+                    url: url,
+                    method: options.method || 'GET',
+                    headers: options.headers || {},
+                    body: options.body || null
+                });
+                
+                // 执行原始 fetch
+                return originalFetch.apply(this, args)
+                    .then(response => {
+                        // 异步记录响应（不阻塞响应返回）
+                        response.clone().text().then(body => {
+                            self._handleResponseReceived({
                                 url: url,
-                                error: error.message
+                                status: response.status,
+                                statusText: response.statusText,
+                                headers: Object.fromEntries(response.headers.entries()),
+                                body: body.substring(0, 1000), // 只记录前1000字符
+                                size: new Blob([body]).size
                             });
-                            throw error;
+                        }).catch(() => {
+                            // 忽略错误
                         });
+                        
+                        return response;
+                    })
+                    .catch(error => {
+                        // 记录失败
+                        self._handleRequestFailed({
+                            url: url,
+                            error: error.message
+                        });
+                        throw error;
+                    });
+            };
+        }
+        
+        /**
+         * 拦截 XMLHttpRequest
+         */
+        _interceptXMLHttpRequest() {
+            if (typeof window === 'undefined' || !window.XMLHttpRequest) {
+                return;
+            }
+            
+            const self = this;
+            const OriginalXHR = window.XMLHttpRequest;
+            
+            window.XMLHttpRequest = function(...args) {
+                const xhr = new OriginalXHR(...args);
+                const originalOpen = xhr.open;
+                const originalSend = xhr.send;
+                let requestUrl = null;
+                let requestMethod = 'GET';
+                let requestHeaders = {};
+                
+                // 拦截 open 方法
+                xhr.open = function(method, url, ...rest) {
+                    requestMethod = method;
+                    requestUrl = url;
+                    return originalOpen.apply(this, [method, url, ...rest]);
                 };
                 
-                if (typeof KernelLogger !== 'undefined') {
-                    KernelLogger.info("NetworkManager", "已启用降级模式（直接拦截 fetch API）");
-                } else {
-                    console.log('[内核][NetworkManager] 已启用降级模式（直接拦截 fetch API）');
-                }
-            }
+                // 拦截 send 方法
+                xhr.send = function(body) {
+                    // 只处理 HTTP/HTTPS 请求
+                    if (!requestUrl || (!requestUrl.startsWith('http://') && !requestUrl.startsWith('https://'))) {
+                        return originalSend.apply(this, [body]);
+                    }
+                    
+                    // 检查网络是否被禁用
+                    if (!self.networkEnabled) {
+                        // 记录被拒绝的请求
+                        self._handleInterceptedRequest({
+                            url: requestUrl,
+                            method: requestMethod,
+                            headers: requestHeaders,
+                            body: body || null
+                        });
+                        
+                        self._handleRequestFailed({
+                            url: requestUrl,
+                            error: 'Network is disabled by NetworkManager'
+                        });
+                        
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.warn("NetworkManager", `XMLHttpRequest 被拒绝: ${requestUrl} (网络已禁用)`);
+                        }
+                        
+                        // 触发 error 事件
+                        setTimeout(() => {
+                            if (xhr.onerror) {
+                                xhr.onerror(new ErrorEvent('error', {
+                                    message: 'Network is disabled by NetworkManager'
+                                }));
+                            }
+                        }, 0);
+                        
+                        return;
+                    }
+                    
+                    // 记录请求
+                    self._handleInterceptedRequest({
+                        url: requestUrl,
+                        method: requestMethod,
+                        headers: requestHeaders,
+                        body: body || null
+                    });
+                    
+                    // 监听响应
+                    xhr.addEventListener('load', function() {
+                        self._handleResponseReceived({
+                            url: requestUrl,
+                            status: xhr.status,
+                            statusText: xhr.statusText,
+                            headers: {},
+                            body: xhr.responseText ? xhr.responseText.substring(0, 1000) : '',
+                            size: xhr.responseText ? new Blob([xhr.responseText]).size : 0
+                        });
+                    });
+                    
+                    xhr.addEventListener('error', function() {
+                        self._handleRequestFailed({
+                            url: requestUrl,
+                            error: 'XMLHttpRequest failed'
+                        });
+                    });
+                    
+                    // 执行原始 send
+                    return originalSend.apply(this, [body]);
+                };
+                
+                return xhr;
+            };
         }
         
         /**
@@ -664,6 +798,9 @@
                 KernelLogger.info("NetworkManager", "网络已启用");
             }
             
+            // 通知 Service Worker
+            this._notifyServiceWorkerNetworkState(true);
+            
             // 通知所有监听器
             this._notifyNetworkEnabledListeners(true);
         }
@@ -682,8 +819,30 @@
                 KernelLogger.info("NetworkManager", "网络已禁用");
             }
             
+            // 通知 Service Worker
+            this._notifyServiceWorkerNetworkState(false);
+            
             // 通知所有监听器
             this._notifyNetworkEnabledListeners(false);
+        }
+        
+        /**
+         * 通知 Service Worker 网络状态变化
+         * @param {boolean} enabled - 是否启用
+         */
+        _notifyServiceWorkerNetworkState(enabled) {
+            if (this.serviceWorker) {
+                try {
+                    this.serviceWorker.postMessage({
+                        type: 'NETWORK_ENABLED',
+                        data: { enabled: enabled }
+                    });
+                } catch (error) {
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.warn("NetworkManager", `通知 Service Worker 网络状态失败: ${error.message}`);
+                    }
+                }
+            }
         }
         
         /**

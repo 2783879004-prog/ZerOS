@@ -18,6 +18,9 @@ self.addEventListener('activate', (event) => {
     );
 });
 
+// 网络启用状态（从主线程同步）
+let networkEnabled = true;
+
 // 拦截 fetch 请求
 self.addEventListener('fetch', (event) => {
     const { request } = event;
@@ -25,6 +28,35 @@ self.addEventListener('fetch', (event) => {
     
     // 只处理 HTTP/HTTPS 请求
     if (!url.protocol.startsWith('http')) {
+        return;
+    }
+    
+    // 检查网络是否被禁用
+    if (!networkEnabled) {
+        // 发送请求拦截消息到主线程
+        sendMessageToClient({
+            type: 'REQUEST_INTERCEPTED',
+            data: {
+                url: request.url,
+                method: request.method,
+                headers: Object.fromEntries(request.headers.entries()),
+                body: request.body ? '存在' : null
+            }
+        });
+        
+        // 发送请求被拒绝消息
+        sendMessageToClient({
+            type: 'REQUEST_FAILED',
+            data: {
+                url: request.url,
+                error: 'Network is disabled by NetworkManager'
+            }
+        });
+        
+        // 返回错误响应
+        event.respondWith(
+            Promise.reject(new Error('Network is disabled by NetworkManager'))
+        );
         return;
     }
     
@@ -137,6 +169,12 @@ self.addEventListener('message', (event) => {
         case 'UNREGISTER_HANDLER':
             requestHandlers.delete(data.pattern);
             console.log(`[NetworkServiceWorker] 注销处理器: ${data.pattern}`);
+            break;
+            
+        case 'NETWORK_ENABLED':
+            // 更新网络启用状态
+            networkEnabled = data.enabled !== false;
+            console.log(`[NetworkServiceWorker] 网络状态已更新: ${networkEnabled ? '启用' : '禁用'}`);
             break;
             
         default:

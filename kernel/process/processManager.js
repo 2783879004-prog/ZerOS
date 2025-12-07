@@ -1192,6 +1192,27 @@ class ProcessManager {
                 }
             }
             
+            // 清理程序创建的桌面组件
+            if (typeof DesktopManager !== 'undefined' && typeof DesktopManager.cleanupProgramComponents === 'function') {
+                try {
+                    DesktopManager.cleanupProgramComponents(pid);
+                    ProcessManager._log(2, `已清理程序 PID ${pid} 的桌面组件`);
+                } catch (e) {
+                    ProcessManager._log(1, `清理程序 PID ${pid} 的桌面组件失败: ${e.message}`);
+                }
+            }
+            
+            // 清理程序创建的通知（仅清理依赖类型的通知，快照类型保留）
+            if (typeof NotificationManager !== 'undefined' && typeof NotificationManager.cleanupProgramNotifications === 'function') {
+                try {
+                    // 只清理依赖类型的通知，快照类型的通知保留，并触发关闭回调
+                    NotificationManager.cleanupProgramNotifications(pid, true, true);
+                    ProcessManager._log(2, `已清理程序 PID ${pid} 的依赖类型通知`);
+                } catch (e) {
+                    ProcessManager._log(1, `清理程序 PID ${pid} 的通知失败: ${e.message}`);
+                }
+            }
+            
             // 在清理GUI之后，关闭关联的CLI程序（避免递归调用）
             if (cliProgramPidToKill) {
                 ProcessManager._log(2, `CLI程序专用终端退出，关闭关联CLI程序 (PID: ${cliProgramPidToKill})`);

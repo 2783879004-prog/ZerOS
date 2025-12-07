@@ -1889,6 +1889,9 @@ class GUIManager {
             }
         }
         
+        // 更新任务栏可见性（最小化后，如果没有最大化窗口，应该显示任务栏）
+        GUIManager._updateTaskbarVisibility();
+        
         KernelLogger.debug("GUIManager", `窗口已最小化: WindowID ${windowId}, PID ${windowInfo.pid}`);
     }
     
@@ -1922,6 +1925,9 @@ class GUIManager {
         if (!windowInfo.isMinimized) {
             return;
         }
+        
+        // 立即更新状态（在动画之前），避免状态不一致导致需要点击两次
+        windowInfo.isMinimized = false;
         
         // 移除最小化类
         windowInfo.window.classList.remove('zos-window-minimized');
@@ -1996,7 +2002,6 @@ class GUIManager {
         }
         
         setTimeout(() => {
-            windowInfo.isMinimized = false;
             // 动画完成后移除动画类
             if (typeof AnimateManager !== 'undefined') {
                 AnimateManager.removeAnimationClasses(windowInfo.window);
@@ -2015,19 +2020,18 @@ class GUIManager {
             pid: windowInfo.pid
         });
         
-        // 更新ProcessManager中的状态
+        // 立即更新ProcessManager中的状态（在动画之前），避免状态不一致
         if (typeof ProcessManager !== 'undefined') {
             const processInfo = ProcessManager.PROCESS_TABLE.get(windowInfo.pid);
             if (processInfo) {
-                // 如果该PID有窗口未最小化，更新ProcessManager状态
-                const allWindows = GUIManager.getWindowsByPid(windowInfo.pid);
-                const hasVisible = allWindows.some(w => !w.isMinimized);
-                if (hasVisible) {
-                    processInfo.isMinimized = false;
-                    ProcessManager._saveProcessTable(ProcessManager.PROCESS_TABLE);
-                }
+                // 立即更新状态，因为窗口已经开始恢复
+                processInfo.isMinimized = false;
+                ProcessManager._saveProcessTable(ProcessManager.PROCESS_TABLE);
             }
         }
+        
+        // 更新任务栏可见性（恢复后，如果窗口是最大化的，应该隐藏任务栏；否则显示）
+        GUIManager._updateTaskbarVisibility();
         
         KernelLogger.debug("GUIManager", `窗口已恢复: WindowID ${windowId}, PID ${windowInfo.pid}`);
     }

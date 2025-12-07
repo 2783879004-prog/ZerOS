@@ -555,6 +555,430 @@ class MemoryManager {
     static getProgramName(pid) {
         return MemoryManager.PROGRAM_NAMES.get(pid) || `Program-${pid}`;
     }
+    
+    // ==================== 内存回收和优化机制 ====================
+    
+    // 垃圾回收配置
+    static _gcConfig = {
+        enabled: true,                    // 是否启用自动垃圾回收
+        interval: 60000,                  // 回收间隔（毫秒），默认60秒
+        minFreePercent: 10,               // 最小空闲百分比阈值，低于此值触发回收
+        maxUsagePercent: 90,              // 最大使用百分比阈值，超过此值触发警告
+        leakDetectionInterval: 300000,   // 内存泄漏检测间隔（毫秒），默认5分钟
+        fragmentationThreshold: 30,      // 碎片化阈值（%），超过此值触发碎片整理
+        compactionEnabled: true          // 是否启用内存压缩
+    };
+    
+    // 垃圾回收定时器
+    static _gcTimer = null;
+    static _leakDetectionTimer = null;
+    
+    // 内存使用历史记录（用于泄漏检测）
+    static _memoryHistory = new Map(); // Map<pid, Array<{timestamp, usage}>>
+    
+    /**
+     * 启动自动垃圾回收
+     */
+    static startGarbageCollection() {
+        if (!MemoryManager._gcConfig.enabled) {
+            return;
+        }
+        
+        // 停止现有的定时器
+        MemoryManager.stopGarbageCollection();
+        
+        // 启动定期垃圾回收
+        MemoryManager._gcTimer = setInterval(() => {
+            MemoryManager._performGarbageCollection();
+        }, MemoryManager._gcConfig.interval);
+        
+        // 启动内存泄漏检测
+        MemoryManager._leakDetectionTimer = setInterval(() => {
+            MemoryManager._detectMemoryLeaks();
+        }, MemoryManager._gcConfig.leakDetectionInterval);
+        
+        MemoryManager._log(2, "自动垃圾回收已启动", {
+            gcInterval: MemoryManager._gcConfig.interval,
+            leakDetectionInterval: MemoryManager._gcConfig.leakDetectionInterval
+        });
+    }
+    
+    /**
+     * 停止自动垃圾回收
+     */
+    static stopGarbageCollection() {
+        if (MemoryManager._gcTimer) {
+            clearInterval(MemoryManager._gcTimer);
+            MemoryManager._gcTimer = null;
+        }
+        if (MemoryManager._leakDetectionTimer) {
+            clearInterval(MemoryManager._leakDetectionTimer);
+            MemoryManager._leakDetectionTimer = null;
+        }
+        MemoryManager._log(2, "自动垃圾回收已停止");
+    }
+    
+    /**
+     * 执行垃圾回收
+     */
+    static _performGarbageCollection() {
+        MemoryManager._log(3, "开始执行垃圾回收");
+        
+        const sop = MemoryManager.APPLICATION_SOP;
+        let totalFreed = 0;
+        let totalChecked = 0;
+        
+        sop.forEach((appSpace, pid) => {
+            // 检查进程是否还在运行
+            if (typeof ProcessManager !== 'undefined') {
+                const processInfo = ProcessManager.PROCESS_TABLE.get(pid);
+                if (!processInfo || processInfo.status !== 'running') {
+                    // 进程已退出，清理其内存
+                    MemoryManager._log(2, `检测到已退出进程 ${pid}，清理内存`);
+                    MemoryManager.freeMemory(pid);
+                    return;
+                }
+            }
+            
+            // 检查堆内存使用情况
+            appSpace.heaps.forEach((heap, heapId) => {
+                totalChecked++;
+                const status = heap._getHeapStatus();
+                const freePercent = (status.free / status.total) * 100;
+                
+                // 如果空闲内存低于阈值，尝试清理
+                if (freePercent < MemoryManager._gcConfig.minFreePercent) {
+                    MemoryManager._log(2, `进程 ${pid} 堆 ${heapId} 内存使用率过高 (${(100 - freePercent).toFixed(2)}%)，尝试清理`);
+                    
+                    // 执行碎片整理
+                    if (MemoryManager._gcConfig.compactionEnabled) {
+                        const freed = MemoryManager._compactHeap(heap);
+                        totalFreed += freed;
+                    }
+                }
+                
+                // 检查内存使用警告
+                const usagePercent = (status.used / status.total) * 100;
+                if (usagePercent > MemoryManager._gcConfig.maxUsagePercent) {
+                    MemoryManager._log(1, `警告: 进程 ${pid} 堆 ${heapId} 内存使用率过高 (${usagePercent.toFixed(2)}%)`, {
+                        pid: pid,
+                        heapId: heapId,
+                        usage: status.used,
+                        total: status.total,
+                        free: status.free
+                    });
+                }
+            });
+        });
+        
+        if (totalFreed > 0) {
+            MemoryManager._log(2, `垃圾回收完成，释放了 ${totalFreed} 个内存块`, {
+                totalChecked: totalChecked,
+                totalFreed: totalFreed
+            });
+        } else {
+            MemoryManager._log(3, `垃圾回收完成，无需清理`, {
+                totalChecked: totalChecked
+            });
+        }
+    }
+    
+    /**
+     * 内存碎片整理
+     * @param {Heap} heap 堆对象
+     * @returns {number} 整理后释放的块数
+     */
+    static _compactHeap(heap) {
+        if (!heap || !heap.memoryDataList) {
+            return 0;
+        }
+        
+        MemoryManager._log(3, `开始整理堆 ${heap.heapId} 的碎片`);
+        
+        const beforeStatus = heap._getHeapStatus();
+        const memoryList = heap.memoryDataList;
+        const newList = [];
+        const addressMap = new Map(); // 旧地址 -> 新地址的映射
+        
+        // 第一步：收集所有已分配的内存块
+        const allocatedBlocks = [];
+        for (let i = 0; i < memoryList.length; i++) {
+            const item = memoryList[i];
+            if (item !== null && typeof item === 'object' && item.__reserved) {
+                const base = item.base;
+                const length = item.length;
+                
+                // 检查是否已经处理过这个块
+                if (i === base) {
+                    allocatedBlocks.push({
+                        base: base,
+                        length: length,
+                        data: memoryList.slice(base, base + length)
+                    });
+                }
+            }
+        }
+        
+        // 第二步：按顺序重新排列
+        let newIndex = 0;
+        for (const block of allocatedBlocks) {
+            const oldBase = block.base;
+            const newBase = newIndex;
+            const length = block.length;
+            
+            // 记录地址映射
+            const hexType = (typeof AddressType !== 'undefined' && AddressType.TYPE.HEX) ? AddressType.TYPE.HEX : 16;
+            const oldAddr = Heap.addressing(oldBase, hexType);
+            const newAddr = Heap.addressing(newBase, hexType);
+            addressMap.set(oldAddr, newAddr);
+            
+            // 复制数据到新位置
+            for (let i = 0; i < length; i++) {
+                newList[newIndex] = {
+                    __reserved: true,
+                    base: newBase,
+                    length: length
+                };
+                newIndex++;
+            }
+        }
+        
+        // 第三步：填充剩余空间为null
+        while (newList.length < memoryList.length) {
+            newList.push(null);
+        }
+        
+        // 第四步：更新堆内存
+        heap.memoryDataList = newList;
+        
+        const afterStatus = heap._getHeapStatus();
+        const freed = beforeStatus.used - afterStatus.used;
+        
+        MemoryManager._log(2, `堆 ${heap.heapId} 碎片整理完成`, {
+            before: beforeStatus,
+            after: afterStatus,
+            freed: freed,
+            addressMappings: addressMap.size
+        });
+        
+        // 注意：地址映射需要通知使用该堆的代码更新引用
+        // 这里只做整理，不更新外部引用（因为外部引用通过resourceLinkArea管理）
+        
+        return freed;
+    }
+    
+    /**
+     * 检测内存泄漏
+     */
+    static _detectMemoryLeaks() {
+        MemoryManager._log(3, "开始检测内存泄漏");
+        
+        const sop = MemoryManager.APPLICATION_SOP;
+        const now = Date.now();
+        const historyWindow = 5 * 60 * 1000; // 5分钟窗口
+        
+        sop.forEach((appSpace, pid) => {
+            // 检查进程是否还在运行
+            if (typeof ProcessManager !== 'undefined') {
+                const processInfo = ProcessManager.PROCESS_TABLE.get(pid);
+                if (!processInfo || processInfo.status !== 'running') {
+                    // 进程已退出，清除历史记录
+                    MemoryManager._memoryHistory.delete(pid);
+                    return;
+                }
+            }
+            
+            // 计算当前内存使用
+            let totalUsed = 0;
+            let totalSize = 0;
+            appSpace.heaps.forEach((heap) => {
+                const status = heap._getHeapStatus();
+                totalUsed += status.used;
+                totalSize += status.total;
+            });
+            
+            const usagePercent = totalSize > 0 ? (totalUsed / totalSize) * 100 : 0;
+            
+            // 获取历史记录
+            let history = MemoryManager._memoryHistory.get(pid);
+            if (!history) {
+                history = [];
+                MemoryManager._memoryHistory.set(pid, history);
+            }
+            
+            // 添加当前记录
+            history.push({
+                timestamp: now,
+                usage: usagePercent,
+                used: totalUsed,
+                total: totalSize
+            });
+            
+            // 清理过期记录
+            history = history.filter(h => now - h.timestamp < historyWindow);
+            MemoryManager._memoryHistory.set(pid, history);
+            
+            // 检测泄漏：如果内存使用持续增长
+            if (history.length >= 3) {
+                const recent = history.slice(-3);
+                const trend = recent[2].usage - recent[0].usage;
+                
+                if (trend > 10 && recent[2].usage > 80) {
+                    MemoryManager._log(1, `检测到潜在内存泄漏: 进程 ${pid}`, {
+                        pid: pid,
+                        programName: MemoryManager.getProgramName(pid),
+                        currentUsage: recent[2].usage.toFixed(2) + '%',
+                        trend: trend.toFixed(2) + '%',
+                        history: recent
+                    });
+                }
+            }
+        });
+        
+        MemoryManager._log(3, "内存泄漏检测完成");
+    }
+    
+    /**
+     * 手动触发垃圾回收
+     * @param {number} pid 进程ID（可选，如果指定则只回收该进程）
+     * @returns {Object} 回收统计信息
+     */
+    static collectGarbage(pid = null) {
+        MemoryManager._log(2, `手动触发垃圾回收`, { pid: pid });
+        
+        const result = {
+            totalChecked: 0,
+            totalFreed: 0,
+            processes: []
+        };
+        
+        const sop = MemoryManager.APPLICATION_SOP;
+        const targetPids = pid ? [pid] : Array.from(sop.keys());
+        
+        targetPids.forEach(currentPid => {
+            if (!sop.has(currentPid)) {
+                return;
+            }
+            
+            const appSpace = sop.get(currentPid);
+            let processFreed = 0;
+            
+            appSpace.heaps.forEach((heap, heapId) => {
+                result.totalChecked++;
+                const beforeStatus = heap._getHeapStatus();
+                
+                if (MemoryManager._gcConfig.compactionEnabled) {
+                    const freed = MemoryManager._compactHeap(heap);
+                    processFreed += freed;
+                }
+                
+                const afterStatus = heap._getHeapStatus();
+                
+                result.processes.push({
+                    pid: currentPid,
+                    heapId: heapId,
+                    before: beforeStatus,
+                    after: afterStatus,
+                    freed: afterStatus.used - beforeStatus.used
+                });
+            });
+            
+            result.totalFreed += processFreed;
+        });
+        
+        MemoryManager._log(2, `手动垃圾回收完成`, result);
+        return result;
+    }
+    
+    /**
+     * 获取内存使用统计
+     * @param {number} pid 进程ID（可选）
+     * @returns {Object} 统计信息
+     */
+    static getMemoryStatistics(pid = null) {
+        const sop = MemoryManager.APPLICATION_SOP;
+        const stats = {
+            totalProcesses: 0,
+            totalHeaps: 0,
+            totalSize: 0,
+            totalUsed: 0,
+            totalFree: 0,
+            averageUsage: 0,
+            processes: []
+        };
+        
+        const targetPids = pid ? [pid] : Array.from(sop.keys());
+        
+        targetPids.forEach(currentPid => {
+            if (!sop.has(currentPid)) {
+                return;
+            }
+            
+            const appSpace = sop.get(currentPid);
+            let processSize = 0;
+            let processUsed = 0;
+            let processFree = 0;
+            
+            appSpace.heaps.forEach((heap) => {
+                stats.totalHeaps++;
+                const status = heap._getHeapStatus();
+                processSize += status.total;
+                processUsed += status.used;
+                processFree += status.free;
+            });
+            
+            const processUsage = processSize > 0 ? (processUsed / processSize) * 100 : 0;
+            
+            stats.processes.push({
+                pid: currentPid,
+                programName: MemoryManager.getProgramName(currentPid),
+                heapCount: appSpace.heaps.size,
+                totalSize: processSize,
+                used: processUsed,
+                free: processFree,
+                usagePercent: processUsage.toFixed(2) + '%'
+            });
+            
+            stats.totalSize += processSize;
+            stats.totalUsed += processUsed;
+            stats.totalFree += processFree;
+        });
+        
+        stats.totalProcesses = stats.processes.length;
+        stats.averageUsage = stats.totalSize > 0 ? (stats.totalUsed / stats.totalSize) * 100 : 0;
+        
+        return stats;
+    }
+    
+    /**
+     * 配置垃圾回收参数
+     * @param {Object} config 配置对象
+     */
+    static configureGC(config) {
+        if (typeof config !== 'object') {
+            MemoryManager._log(1, "configureGC: 配置参数必须是对象");
+            return;
+        }
+        
+        Object.assign(MemoryManager._gcConfig, config);
+        
+        // 如果修改了间隔，重启定时器
+        if (config.interval || config.leakDetectionInterval) {
+            if (MemoryManager._gcTimer || MemoryManager._leakDetectionTimer) {
+                MemoryManager.startGarbageCollection();
+            }
+        }
+        
+        MemoryManager._log(2, "垃圾回收配置已更新", MemoryManager._gcConfig);
+    }
+    
+    /**
+     * 获取垃圾回收配置
+     * @returns {Object} 配置对象
+     */
+    static getGCConfig() {
+        return { ...MemoryManager._gcConfig };
+    }
 }
 
 // 不导出到全局作用域，交由POOL管理
@@ -581,6 +1005,26 @@ if (typeof POOL !== 'undefined' && typeof POOL.__ADD__ === 'function') {
     } else if (typeof globalThis !== 'undefined') {
         globalThis.MemoryManager = MemoryManager;
     }
+}
+
+// 自动启动垃圾回收（延迟启动，确保系统完全初始化）
+if (typeof window !== 'undefined') {
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', () => {
+            setTimeout(() => {
+                MemoryManager.startGarbageCollection();
+            }, 5000); // 延迟5秒启动，确保系统完全初始化
+        });
+    } else {
+        setTimeout(() => {
+            MemoryManager.startGarbageCollection();
+        }, 5000);
+    }
+} else {
+    // 非浏览器环境，直接启动
+    setTimeout(() => {
+        MemoryManager.startGarbageCollection();
+    }, 5000);
 }
 
 DependencyConfig.publishSignal("../kernel/memory/memoryManager.js");

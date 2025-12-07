@@ -2925,12 +2925,17 @@
                 try {
                     // NetworkManager是实例对象，方法不需要PID参数
                     const isOnline = networkManager.isOnline();
+                    const isEnabled = networkManager.isNetworkEnabled ? networkManager.isNetworkEnabled() : true;
                     const connectionInfo = networkManager.getConnectionInfo();
                     const networkStateSnapshot = networkManager.getNetworkStateSnapshot();
                             
                     html += `<div style="margin-bottom: 12px; padding: 12px; background: rgba(108, 142, 255, 0.05); border-radius: 6px;">`;
-                    html += `<div style="color: #8da6ff; font-weight: 600; margin-bottom: 4px;">在线状态</div>`;
-                    html += `<div style="color: ${isOnline ? '#4ade80' : '#ff4444'}; font-size: 14px;">${isOnline ? '✓ 在线' : '✗ 离线'}</div>`;
+                    html += `<div style="color: #8da6ff; font-weight: 600; margin-bottom: 4px;">网络状态</div>`;
+                    if (!isEnabled) {
+                        html += `<div style="color: #9ca3af; font-size: 14px;">✗ 网络已禁用</div>`;
+                    } else {
+                        html += `<div style="color: ${isOnline ? '#4ade80' : '#ff4444'}; font-size: 14px;">${isOnline ? '✓ 在线' : '✗ 离线'}</div>`;
+                    }
                     html += `</div>`;
                     
                     if (connectionInfo) {

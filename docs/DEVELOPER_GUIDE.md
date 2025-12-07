@@ -35,6 +35,7 @@ ZerOS 是一个基于浏览器的操作系统内核，提供了完整的进程�
 - **ContextMenuManager**: 上下文菜单管理器
 - **TaskbarManager**: 任务栏管理器
 - **NetworkManager**: 网络管理器，提供网络状态和电池信息
+- **NotificationManager**: 通知管理器，提供系统通知的创建、显示和管理
 - **Disk**: 文件系统接口，提供文件和目录操作
 - **POOL**: 全局对象池，用于存储和共享内核对象
 - **KernelLogger**: 内核日志系统
@@ -678,6 +679,122 @@ POOL 是全局对象池，用于存储和共享内核对象。
 - `pid` (number): 进程 ID（可选）
 
 **返回值**: `Promise<Object>` - 电池信息对象
+
+### NotificationManager API
+
+#### `NotificationManager.createNotification(pid, options)`
+
+创建通知。
+
+**参数**:
+- `pid` (number): 程序 PID
+- `options` (Object): 通知选项
+  - `type` (string): 通知类型，`'snapshot'`（快照）或 `'dependent'`（依赖），默认 `'snapshot'`
+  - `title` (string): 通知标题（可选，仅 snapshot 类型）
+  - `content` (string|HTMLElement): 通知内容，可以是 HTML 字符串或 HTMLElement
+  - `duration` (number): 自动关闭时长（毫秒，0 表示不自动关闭，可选）
+  - `onClose` (Function): 关闭回调（可选，仅 dependent 类型），`(notificationId, pid) => {}`
+
+**返回值**: `string` - 通知 ID
+
+**示例**:
+```javascript
+// 创建快照通知
+const notificationId = NotificationManager.createNotification(this.pid, {
+    type: 'snapshot',
+    title: '系统通知',
+    content: '这是一条通知消息',
+    duration: 5000  // 5秒后自动关闭
+});
+
+// 创建依赖通知（用于持续显示的内容）
+const dependentId = NotificationManager.createNotification(this.pid, {
+    type: 'dependent',
+    content: myContentElement,  // HTMLElement
+    onClose: (notificationId, pid) => {
+        // 处理关闭逻辑
+    }
+});
+```
+
+#### `NotificationManager.removeNotification(notificationId, silent)`
+
+移除通知。
+
+**参数**:
+- `notificationId` (string): 通知 ID
+- `silent` (boolean): 是否静默移除（不触发回调），默认 `false`
+
+**返回值**: `boolean` - 是否成功
+
+#### `NotificationManager.updateNotificationContent(notificationId, content)`
+
+更新通知内容。
+
+**参数**:
+- `notificationId` (string): 通知 ID
+- `content` (string|HTMLElement): 新内容
+
+#### `NotificationManager.getNotificationContentContainer(notificationId)`
+
+获取通知内容容器（用于动态更新内容）。
+
+**参数**:
+- `notificationId` (string): 通知 ID
+
+**返回值**: `HTMLElement|null` - 内容容器元素
+
+**示例**:
+```javascript
+const container = NotificationManager.getNotificationContentContainer(notificationId);
+if (container) {
+    // 动态更新内容
+    container.innerHTML = '<div>新内容</div>';
+}
+```
+
+#### `NotificationManager.getNotificationCount()`
+
+获取通知数量。
+
+**返回值**: `number` - 通知数量
+
+#### `NotificationManager.getNotificationsByPid(pid)`
+
+获取程序的所有通知 ID。
+
+**参数**:
+- `pid` (number): 程序 PID
+
+**返回值**: `Array<string>` - 通知 ID 数组
+
+#### `NotificationManager.getAllNotifications(pid)`
+
+获取所有通知信息。
+
+**参数**:
+- `pid` (number|null): 可选，如果提供则只返回该程序的通知
+
+**返回值**: `Array<Object>` - 通知信息数组
+
+#### `NotificationManager.cleanupProgramNotifications(pid, triggerCallbacks, onlyDependent)`
+
+清理程序的所有通知。
+
+**参数**:
+- `pid` (number): 程序 PID
+- `triggerCallbacks` (boolean): 是否触发依赖类型的关闭回调，默认 `false`
+- `onlyDependent` (boolean): 是否只清理依赖类型的通知，默认 `true`
+
+#### `NotificationManager.toggleNotificationContainer()`
+
+切换通知栏显示状态。
+
+#### `NotificationManager.isShowing()`
+
+获取通知栏显示状态。
+
+**返回值**: `boolean` - 是否正在显示
 
 ---
 

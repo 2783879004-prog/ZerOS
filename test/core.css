@@ -803,6 +803,41 @@ html, body {
 /* 应用程序启动器图标 */
 /* .taskbar-app-launcher 继承 .taskbar-icon 的样式，无需额外样式 */
 
+/* 通知按钮样式 */
+.taskbar-notification-button {
+    cursor: pointer;
+}
+
+.notification-button-icon {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    font-size: 20px;
+    user-select: none;
+}
+
+.notification-badge {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    background: #ec4141;
+    color: #ffffff;
+    font-size: 10px;
+    font-weight: bold;
+    min-width: 16px;
+    height: 16px;
+    border-radius: 8px;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    padding: 0 4px;
+    box-sizing: border-box;
+    z-index: 10;
+    pointer-events: none;
+}
+
 .app-launcher-icon {
     width: 32px;
     height: 32px;
@@ -1086,48 +1121,33 @@ html, body {
 
 .taskbar-app-menu-category-programs {
     padding-left: 28px;
-    padding-top: 6px;
-    padding-bottom: 6px;
+    padding-top: 0;
+    padding-bottom: 0;
     padding-right: 0;
-    display: none;
+    display: grid;
+    grid-template-rows: 0fr;
     overflow: hidden;
-    max-height: 0;
     opacity: 0;
-    transform: translateY(-10px) scale(0.98);
-    transition: max-height 0.4s cubic-bezier(0.4, 0, 0.2, 1),
-                opacity 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-                transform 0.35s cubic-bezier(0.4, 0, 0.2, 1),
-                padding 0.35s cubic-bezier(0.4, 0, 0.2, 1);
-    will-change: max-height, opacity, transform;
+    transform: translateY(-8px) scale(0.98);
+    transition: grid-template-rows 0.3s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                opacity 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                transform 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                padding-top 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94),
+                padding-bottom 0.25s cubic-bezier(0.25, 0.46, 0.45, 0.94);
+    will-change: grid-template-rows, opacity, transform;
+}
+
+.taskbar-app-menu-category-programs-wrapper {
+    min-height: 0;
+    overflow: hidden;
 }
 
 .taskbar-app-menu-category-programs.show {
-    display: block;
-    max-height: 2000px;
+    grid-template-rows: 1fr;
     opacity: 1;
     transform: translateY(0) scale(1);
-    animation: programsExpand 0.4s cubic-bezier(0.4, 0, 0.2, 1);
-}
-
-@keyframes programsExpand {
-    0% {
-        max-height: 0;
-        opacity: 0;
-        transform: translateY(-10px) scale(0.98);
-        padding-top: 0;
-        padding-bottom: 0;
-    }
-    50% {
-        opacity: 0.7;
-        transform: translateY(-2px) scale(0.99);
-    }
-    100% {
-        max-height: 2000px;
-        opacity: 1;
-        transform: translateY(0) scale(1);
-        padding-top: 6px;
-        padding-bottom: 6px;
-    }
+    padding-top: 6px;
+    padding-bottom: 6px;
 }
 
 /* 程序项的渐入动画 */
@@ -2943,4 +2963,220 @@ html, body {
     backdrop-filter: var(--style-window-backdrop-filter, blur(30px) saturate(180%)) !important;
     -webkit-backdrop-filter: var(--style-window-backdrop-filter, blur(30px) saturate(180%)) !important;
     border-radius: var(--style-window-border-radius, 12px) !important;
+}
+
+/* ==================== 通知管理器 ==================== */
+
+/* 通知蒙版层 */
+.notification-overlay {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    width: 45vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(2px);
+    -webkit-backdrop-filter: blur(2px);
+    z-index: 9998;
+    display: none;
+    pointer-events: auto;
+    opacity: 0;
+    transition: opacity 0.15s ease-out;
+}
+
+/* 通知容器 */
+.notification-container {
+    position: fixed;
+    top: 20px;
+    right: 20px;
+    width: 380px;
+    max-width: calc(100vw - 40px);
+    height: auto;
+    max-height: calc(100vh - 40px);
+    z-index: 10000;
+    display: none;
+    flex-direction: column;
+    gap: 12px;
+    padding: 0;
+    pointer-events: none;
+    overflow-y: auto;
+    overflow-x: hidden;
+    will-change: transform, opacity, filter;
+    transform-origin: center center;
+}
+
+.notification-container::-webkit-scrollbar {
+    width: 6px;
+}
+
+.notification-container::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.notification-container::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 3px;
+}
+
+.notification-container::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* 通知容器关闭按钮 */
+.notification-container-close {
+    position: absolute;
+    top: 12px;
+    right: 12px;
+    width: 32px;
+    height: 32px;
+    border: none;
+    background: rgba(255, 255, 255, 0.1);
+    color: #e0e0e0;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 16px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    z-index: 10001;
+    pointer-events: auto;
+}
+
+.notification-container-close:hover {
+    background: rgba(255, 255, 255, 0.2);
+    transform: scale(1.1);
+}
+
+.notification-container-close:active {
+    transform: scale(0.95);
+}
+
+/* 通知项 */
+.notification-item {
+    background: rgba(30, 30, 30, 0.95);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    box-shadow: 
+        0 8px 32px rgba(0, 0, 0, 0.4),
+        0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+    padding: 16px;
+    min-height: 60px;
+    height: auto;
+    max-height: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    position: relative;
+    pointer-events: auto;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-sizing: border-box;
+}
+
+.notification-item:hover {
+    background: rgba(35, 35, 35, 0.98);
+    box-shadow: 
+        0 12px 40px rgba(0, 0, 0, 0.5),
+        0 0 0 1px rgba(255, 255, 255, 0.1) inset;
+    transform: translateY(-2px);
+}
+
+/* 通知滑入动画 */
+@keyframes notificationSlideIn {
+    0% {
+        opacity: 0;
+        transform: translateX(40px) scale(0.9);
+    }
+    60% {
+        transform: translateX(-5px) scale(1.02);
+    }
+    100% {
+        opacity: 1;
+        transform: translateX(0) scale(1);
+    }
+}
+
+.notification-item {
+    animation: notificationSlideIn 0.25s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* 通知内容 */
+.notification-content {
+    flex: 1;
+    min-height: 0;
+    color: #b3b3b3;
+    font-size: 13px;
+    line-height: 1.5;
+    word-wrap: break-word;
+    overflow-wrap: break-word;
+}
+
+/* 通知关闭按钮 */
+.notification-item button {
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.notification-item button:active {
+    transform: scale(0.95);
+}
+
+/* 依赖类型通知的包装容器（水滴效果） */
+.notification-dependent-wrapper {
+    position: relative;
+    margin-top: -12px;
+    margin-left: 0;
+    margin-right: 0;
+    margin-bottom: 12px;
+    padding: 0;
+    overflow: hidden;
+    will-change: width, height, border-radius, transform, opacity;
+    transform-origin: center center;
+    z-index: 1;
+    min-width: 0;
+    flex-shrink: 0;
+}
+
+.notification-dependent-wrapper .notification-item {
+    margin: 0;
+    border-radius: inherit;
+    width: 100%;
+    max-width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 100px; /* 确保有足够的高度 */
+    max-height: none;
+    box-sizing: border-box;
+    padding: 12px !important; /* 依赖类型通知减少 padding，因为没有标题栏 */
+    gap: 0 !important; /* 依赖类型通知不需要 gap */
+    animation: none !important; /* 禁用默认动画，使用包装容器的动画 */
+}
+
+.notification-dependent-wrapper .notification-content {
+    width: 100%;
+    display: flex;
+    flex-direction: column;
+    gap: 0;
+    padding: 0;
+    margin: 0;
+}
+
+/* 响应式设计 */
+@media (max-width: 600px) {
+    .notification-container {
+        width: calc(100vw - 40px);
+        max-width: 380px;
+        right: 20px;
+        left: 20px;
+    }
+    
+    .notification-item {
+        padding: 12px;
+        min-height: 50px;
+    }
+    
+    .notification-content {
+        font-size: 12px;
+    }
 }

@@ -333,22 +333,22 @@ const ANIMATION_PRESETS = {
         }
     },
     
-    // 类别折叠操作
+    // 类别折叠操作（已优化为更流畅的动画）
     CATEGORY: {
-        // 类别展开
+        // 类别展开（使用更平滑的缓动函数）
         EXPAND: {
-            duration: 300,
+            duration: 250,
             easing: 'easeOutCubic',
             opacity: [0, 1],
-            translateY: [-5, 0],
+            translateY: [-8, 0],
             scale: [0.98, 1]
         },
-        // 类别折叠
+        // 类别折叠（快速收回，保持流畅）
         COLLAPSE: {
-            duration: 300,
+            duration: 250,
             easing: 'easeInCubic',
             opacity: [1, 0],
-            translateY: [0, -5],
+            translateY: [0, -8],
             scale: [1, 0.98]
         }
     },

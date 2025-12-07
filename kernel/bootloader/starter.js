@@ -42,6 +42,7 @@
         "../kernel/process/guiManager.js": ["../kernel/process/processManager.js", "../kernel/process/eventManager.js"],
         "../kernel/process/contextMenuManager.js": ["../kernel/process/processManager.js"],
         "../kernel/process/taskbarManager.js": ["../kernel/process/processManager.js", "../kernel/process/applicationAssetManager.js", "../kernel/process/contextMenuManager.js", "../kernel/process/eventManager.js", "../kernel/process/programCategories.js", "../kernel/process/themeManager.js"],
+        "../kernel/process/notificationManager.js": ["../kernel/process/taskbarManager.js", "../kernel/process/processManager.js"],
         "../kernel/process/desktop.js": ["../kernel/process/processManager.js", "../kernel/process/applicationAssetManager.js", "../kernel/process/contextMenuManager.js", "../kernel/process/themeManager.js", "../kernel/process/guiManager.js"],
         
         // 第七层：文件系统初始化（依赖所有文件系统模块）
@@ -605,6 +606,12 @@
         }
         
         check('TaskbarManager', typeof TaskbarManager !== 'undefined');
+        check('NotificationManager', typeof NotificationManager !== 'undefined');
+        if (typeof NotificationManager !== 'undefined') {
+            check('NotificationManager.init', typeof NotificationManager.init === 'function');
+            check('NotificationManager.createNotification', typeof NotificationManager.createNotification === 'function');
+            check('NotificationManager.removeNotification', typeof NotificationManager.removeNotification === 'function');
+        }
         check('ContextMenuManager', typeof ContextMenuManager !== 'undefined');
         check('EventManager', typeof EventManager !== 'undefined');
         
@@ -1032,6 +1039,22 @@
                         }, 500);
                     } catch (e) {
                         KernelLogger.warn("BootLoader", `任务栏初始化失败: ${e.message}`);
+                    }
+                }
+                
+                // 初始化通知管理器（如果 NotificationManager 已加载）
+                if (typeof NotificationManager !== 'undefined' && typeof NotificationManager.init === 'function') {
+                    try {
+                        // 延迟初始化，确保任务栏已初始化（通知管理器依赖任务栏位置）
+                        setTimeout(() => {
+                            NotificationManager.init().then(() => {
+                                KernelLogger.info("BootLoader", "通知管理器初始化完成");
+                            }).catch(e => {
+                                KernelLogger.warn("BootLoader", `通知管理器初始化失败: ${e.message}`);
+                            });
+                        }, 1000);
+                    } catch (e) {
+                        KernelLogger.warn("BootLoader", `通知管理器初始化失败: ${e.message}`);
                     }
                 }
             }
