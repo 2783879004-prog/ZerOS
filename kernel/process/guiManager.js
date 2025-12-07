@@ -1935,21 +1935,48 @@ class GUIManager {
         windowInfo.window.style.opacity = '';
         windowInfo.window.style.pointerEvents = '';
         
-        // 恢复窗口状态
-        if (windowInfo.windowState.savedLeft !== null) {
-            windowInfo.window.style.left = windowInfo.windowState.savedLeft;
-        }
-        if (windowInfo.windowState.savedTop !== null) {
-            windowInfo.window.style.top = windowInfo.windowState.savedTop;
-        }
-        if (windowInfo.windowState.savedWidth !== null) {
-            windowInfo.window.style.width = windowInfo.windowState.savedWidth;
-        }
-        if (windowInfo.windowState.savedHeight !== null) {
-            windowInfo.window.style.height = windowInfo.windowState.savedHeight;
-        }
-        if (windowInfo.windowState.savedTransform !== null) {
-            windowInfo.window.style.transform = windowInfo.windowState.savedTransform;
+        // 如果窗口之前是最大化的，重新应用最大化样式
+        // 而不是恢复保存的位置和大小（因为最小化时保存的是最大化时的状态）
+        if (windowInfo.isMaximized) {
+            const guiContainer = document.getElementById('gui-container');
+            if (guiContainer) {
+                const containerRect = guiContainer.getBoundingClientRect();
+                windowInfo.window.style.left = '0';
+                windowInfo.window.style.top = '0';
+                windowInfo.window.style.width = containerRect.width + 'px';
+                windowInfo.window.style.height = '100vh';
+                windowInfo.window.style.transform = 'none';
+            } else {
+                windowInfo.window.style.left = '0';
+                windowInfo.window.style.top = '0';
+                windowInfo.window.style.width = '100%';
+                windowInfo.window.style.height = '100vh';
+                windowInfo.window.style.transform = 'none';
+            }
+            
+            // 确保全屏窗口的z-index高于任务栏
+            const currentZIndex = windowInfo.zIndex;
+            if (currentZIndex <= 99999) {
+                windowInfo.zIndex = 100000;
+                windowInfo.window.style.setProperty('z-index', '100000', 'important');
+            }
+        } else {
+            // 如果窗口不是最大化的，恢复保存的状态
+            if (windowInfo.windowState.savedLeft !== null) {
+                windowInfo.window.style.left = windowInfo.windowState.savedLeft;
+            }
+            if (windowInfo.windowState.savedTop !== null) {
+                windowInfo.window.style.top = windowInfo.windowState.savedTop;
+            }
+            if (windowInfo.windowState.savedWidth !== null) {
+                windowInfo.window.style.width = windowInfo.windowState.savedWidth;
+            }
+            if (windowInfo.windowState.savedHeight !== null) {
+                windowInfo.window.style.height = windowInfo.windowState.savedHeight;
+            }
+            if (windowInfo.windowState.savedTransform !== null) {
+                windowInfo.window.style.transform = windowInfo.windowState.savedTransform;
+            }
         }
         
         // 添加恢复动画（使用 AnimateManager，根据任务栏位置调整方向）
@@ -2340,13 +2367,14 @@ class GUIManager {
     
     /**
      * 更新任务栏可见性
-     * 如果有任何窗口处于最大化状态，则隐藏任务栏；否则显示任务栏
+     * 如果有任何窗口处于最大化状态且未最小化，则隐藏任务栏；否则显示任务栏
      */
     static _updateTaskbarVisibility() {
-        // 检查是否有任何窗口处于最大化状态
+        // 检查是否有任何窗口处于最大化状态且未最小化
+        // 注意：最小化的窗口不应该隐藏任务栏，即使它之前是最大化的
         let hasMaximizedWindow = false;
         for (const [windowId, windowInfo] of GUIManager._windows) {
-            if (windowInfo.isMaximized) {
+            if (windowInfo.isMaximized && !windowInfo.isMinimized) {
                 hasMaximizedWindow = true;
                 break;
             }

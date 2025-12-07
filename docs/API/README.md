@@ -21,16 +21,16 @@
 - [ThemeManager.md](./ThemeManager.md) - 主题管理 ✅
 - [EventManager.md](./EventManager.md) - 事件管理 ✅
 - [ContextMenuManager.md](./ContextMenuManager.md) - 上下文菜单管理 ✅
-- [DesktopManager.md](./DesktopManager.md) - 桌面管理（待创建）
+- [DesktopManager.md](./DesktopManager.md) - 桌面管理 ✅
 
 ### 文件系统
 - [Disk.md](./Disk.md) - 虚拟磁盘管理 ✅
-- [NodeTree.md](./NodeTree.md) - 文件树结构（待创建）
-- [FileFramework.md](./FileFramework.md) - 文件对象模板（待创建）
+- [NodeTree.md](./NodeTree.md) - 文件树结构 ✅
+- [FileFramework.md](./FileFramework.md) - 文件对象模板 ✅
 
 ### 驱动层
 - [AnimateManager.md](./AnimateManager.md) - 动画管理 ✅
-- [NetworkManager.md](./NetworkManager.md) - 网络管理（待创建）
+- [NetworkManager.md](./NetworkManager.md) - 网络管理 ✅
 - [LStorage.md](./LStorage.md) - 本地存储 ✅
 
 ### 信号系统
@@ -38,7 +38,7 @@
 - [DependencyConfig.md](./DependencyConfig.md) - 依赖管理和模块加载 ✅
 
 ### 启动引导
-- [Starter.md](./Starter.md) - 内核启动器（待创建）
+- [Starter.md](./Starter.md) - 内核启动器 ✅
 
 ### 应用程序资源
 - [ApplicationAssetManager.md](./ApplicationAssetManager.md) - 应用程序资源管理 ✅
