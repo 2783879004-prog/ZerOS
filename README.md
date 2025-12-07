@@ -974,4 +974,8 @@ GNU GENERAL PUBLIC LICENSE VERSION 2.0(参见LICENSE)
 
 ---
 
+## 联系方式
+- **QQ**: 3964338965
+- **邮箱**: hacker200714@outlook.com
+
 **ZerOS Kernel** - 一个强大的虚拟操作系统内核，在浏览器中体验完整的系统操作。
