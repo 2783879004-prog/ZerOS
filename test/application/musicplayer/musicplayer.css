@@ -1,0 +1,1255 @@
+/* ZerOS 音乐播放器样式 */
+/* 高仿网易云音乐风格 */
+
+.musicplayer-window {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', 'Helvetica Neue', Helvetica, Arial, sans-serif;
+}
+
+/* 全屏/最大化时的沉浸式体验 */
+.musicplayer-window.zos-window-maximized {
+    border-radius: 0 !important;
+    border: none !important;
+}
+
+.musicplayer-window.zos-window-maximized .musicplayer-container {
+    border-radius: 0;
+}
+
+/* 沉浸式播放页面 */
+.immersive-player-view {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(135deg, #0a0a0a 0%, #1a1a2e 30%, #2d1b3d 60%, #1a1a2e 100%);
+    display: none;
+    flex-direction: column;
+    z-index: 1;
+    overflow: hidden;
+    animation: fadeIn 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: none;
+}
+
+.immersive-content {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 60px 40px 40px 40px;
+    overflow: hidden;
+    min-height: 0;
+    gap: 40px;
+    pointer-events: none;
+    position: relative;
+    z-index: 1;
+}
+
+.immersive-main-layout {
+    display: flex;
+    flex-direction: row;
+    align-items: flex-start;
+    justify-content: center;
+    gap: 60px;
+    width: 100%;
+    max-width: 1400px;
+    flex: 1;
+    min-height: 0;
+}
+
+.immersive-left-section {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 30px;
+    flex: 0 0 auto;
+    max-width: 500px;
+}
+
+.immersive-right-section {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+    max-width: 600px;
+    min-width: 400px;
+}
+
+@keyframes fadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+/* 磁盘层叠容器 */
+.immersive-cover-stack {
+    position: relative;
+    width: 500px;
+    height: 500px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    animation: scaleIn 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+    flex-shrink: 0;
+    pointer-events: none;
+}
+
+/* 磁盘层 */
+.immersive-cover-layer {
+    position: absolute;
+    border-radius: 50%;
+    overflow: hidden;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    pointer-events: none;
+    background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
+    box-shadow: 
+        0 20px 60px rgba(0, 0, 0, 0.6),
+        inset 0 0 30px rgba(0, 0, 0, 0.5);
+}
+
+.immersive-cover-layer:nth-child(2) {
+    background: linear-gradient(135deg, #3a3a3a 0%, #2a2a2a 100%);
+    box-shadow: 
+        0 25px 70px rgba(0, 0, 0, 0.7),
+        inset 0 0 35px rgba(0, 0, 0, 0.4);
+}
+
+.immersive-cover-layer:nth-child(3) {
+    background: linear-gradient(135deg, #2a2a2a 0%, #1a1a1a 100%);
+    box-shadow: 
+        0 30px 80px rgba(0, 0, 0, 0.8),
+        0 0 60px rgba(236, 65, 65, 0.2),
+        inset 0 0 40px rgba(0, 0, 0, 0.3);
+}
+
+.immersive-cover-layer img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    border-radius: 50%;
+    display: block;
+}
+
+/* 顶层磁盘（旋转） */
+.immersive-cover-top {
+    animation: coverRotate 20s linear infinite;
+    animation-play-state: paused;
+    transition: animation-play-state 0.3s;
+}
+
+.immersive-cover-top.playing {
+    animation-play-state: running;
+}
+
+@keyframes coverRotate {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes scaleIn {
+    from {
+        transform: scale(0.8) rotate(-5deg);
+        opacity: 0;
+    }
+    to {
+        transform: scale(1) rotate(0deg);
+        opacity: 1;
+    }
+}
+
+/* 移除旧的封面发光效果，已改用磁盘层叠样式 */
+
+/* 移除旧的封面旋转样式，已移至 .immersive-cover-top */
+
+.immersive-song-info {
+    text-align: center;
+    color: #e0e0e0;
+    width: 100%;
+    animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) 0.2s both;
+}
+
+.immersive-song-name {
+    font-size: 32px;
+    font-weight: 700;
+    margin-bottom: 12px;
+    color: #ffffff;
+    text-shadow: 0 2px 8px rgba(0, 0, 0, 0.5);
+    letter-spacing: 0.5px;
+}
+
+.immersive-artist-name {
+    font-size: 18px;
+    color: rgba(255, 255, 255, 0.8);
+    font-weight: 400;
+    margin-bottom: 20px;
+}
+
+.immersive-current-song {
+    margin-top: 20px;
+    padding: 12px 20px;
+    background: rgba(236, 65, 65, 0.15);
+    backdrop-filter: blur(10px);
+    border-radius: 12px;
+    border: 1px solid rgba(236, 65, 65, 0.3);
+    font-size: 14px;
+    color: #ec4141;
+    font-weight: 500;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.immersive-current-song:hover {
+    background: rgba(236, 65, 65, 0.25);
+    border-color: rgba(236, 65, 65, 0.5);
+    transform: translateY(-2px);
+}
+
+.immersive-lyrics {
+    flex: 1;
+    width: 100%;
+    min-height: 300px;
+    max-height: 500px;
+    overflow-y: auto;
+    text-align: center;
+    padding: 30px 20px;
+    color: #e0e0e0;
+    font-size: 18px;
+    line-height: 2.8;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-start;
+    pointer-events: auto;
+    background: rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(10px);
+    border-radius: 16px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) 0.3s both;
+}
+
+.immersive-lyrics::-webkit-scrollbar {
+    width: 6px;
+}
+
+.immersive-lyrics::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+.immersive-lyrics::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.3);
+    border-radius: 3px;
+}
+
+.lyric-line {
+    margin: 10px 0;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    color: #999;
+    font-size: 18px;
+    text-shadow: 0 2px 4px rgba(0, 0, 0, 0.3);
+    transform: scale(1);
+}
+
+.lyric-line.active {
+    color: #ec4141;
+    font-size: 24px;
+    font-weight: bold;
+    text-shadow: 0 0 20px rgba(236, 65, 65, 0.6), 0 4px 8px rgba(0, 0, 0, 0.4);
+    transform: scale(1.05);
+    animation: lyricPulse 2s ease-in-out infinite;
+}
+
+@keyframes lyricPulse {
+    0%, 100% {
+        text-shadow: 0 0 20px rgba(236, 65, 65, 0.6), 0 4px 8px rgba(0, 0, 0, 0.4);
+    }
+    50% {
+        text-shadow: 0 0 30px rgba(236, 65, 65, 0.8), 0 6px 12px rgba(0, 0, 0, 0.5);
+    }
+}
+
+.immersive-progress-bar {
+    flex: 1;
+    height: 6px;
+    background: rgba(255, 255, 255, 0.15);
+    border-radius: 3px;
+    cursor: pointer;
+    position: relative;
+    pointer-events: auto;
+    transition: height 0.2s;
+}
+
+.immersive-progress-bar:hover {
+    height: 8px;
+}
+
+.immersive-progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #ec4141 0%, #ff6b6b 100%);
+    border-radius: 3px;
+    width: 0%;
+    transition: width 0.1s;
+    position: relative;
+    box-shadow: 0 0 10px rgba(236, 65, 65, 0.5);
+}
+
+.immersive-progress-bar:hover .immersive-progress-fill {
+    box-shadow: 0 0 15px rgba(236, 65, 65, 0.7);
+}
+
+.immersive-controls {
+    width: 100%;
+    max-width: 1200px;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 30px 0;
+    flex-shrink: 0;
+    pointer-events: auto;
+    animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) 0.4s both;
+}
+
+.immersive-progress-container {
+    width: 100%;
+    display: flex;
+    align-items: center;
+    gap: 20px;
+}
+
+.immersive-time {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.7);
+    min-width: 50px;
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+}
+
+.immersive-control-buttons {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 40px;
+}
+
+.immersive-play-button {
+    width: 72px !important;
+    height: 72px !important;
+    font-size: 32px !important;
+    background: linear-gradient(135deg, #ec4141 0%, #d63636 100%) !important;
+    color: white !important;
+    box-shadow: 
+        0 8px 24px rgba(236, 65, 65, 0.5),
+        0 0 20px rgba(236, 65, 65, 0.3);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+    border: 2px solid rgba(255, 255, 255, 0.1);
+}
+
+.immersive-play-button:hover {
+    background: linear-gradient(135deg, #d63636 0%, #c02e2e 100%) !important;
+    transform: scale(1.1) !important;
+    box-shadow: 
+        0 12px 32px rgba(236, 65, 65, 0.7),
+        0 0 30px rgba(236, 65, 65, 0.5);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+.immersive-play-button:active {
+    transform: scale(1.05) !important;
+}
+
+.immersive-close-btn {
+    position: absolute;
+    top: 20px;
+    right: 20px;
+    width: 44px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 0, 0, 0.4);
+    backdrop-filter: blur(10px);
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 20px;
+    color: #e0e0e0;
+    z-index: 10;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    pointer-events: auto;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+}
+
+.immersive-close-btn:hover {
+    background: rgba(236, 65, 65, 0.3);
+    transform: scale(1.1) rotate(90deg);
+    border-color: rgba(236, 65, 65, 0.5);
+}
+
+.immersive-credits {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    padding: 20px;
+    background: rgba(0, 0, 0, 0.2);
+    backdrop-filter: blur(10px);
+    border-radius: 12px;
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.7);
+    pointer-events: auto;
+    animation: fadeInUp 0.6s cubic-bezier(0.4, 0, 0.2, 1) 0.35s both;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.immersive-credits:hover {
+    background: rgba(0, 0, 0, 0.3);
+    border-color: rgba(255, 255, 255, 0.2);
+}
+
+/* 响应式设计 */
+@media (max-width: 1400px) {
+    .immersive-main-layout {
+        gap: 40px;
+    }
+    
+    .immersive-cover-stack {
+        width: 450px;
+        height: 450px;
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(1) {
+        width: 405px;
+        height: 405px;
+        font-size: 90px;
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(2) {
+        width: 432px;
+        height: 432px;
+        font-size: 99px;
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(3) {
+        width: 450px;
+        height: 450px;
+        font-size: 108px;
+    }
+}
+
+@media (max-width: 1200px) {
+    .immersive-main-layout {
+        flex-direction: column;
+        align-items: center;
+        gap: 40px;
+    }
+    
+    .immersive-left-section,
+    .immersive-right-section {
+        max-width: 100%;
+        min-width: auto;
+        width: 100%;
+    }
+    
+    .immersive-cover-stack {
+        width: 400px;
+        height: 400px;
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(1) {
+        width: 360px;
+        height: 360px;
+        font-size: 80px;
+        transform: translate(12px, 12px);
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(2) {
+        width: 384px;
+        height: 384px;
+        font-size: 88px;
+        transform: translate(8px, 8px);
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(3) {
+        width: 400px;
+        height: 400px;
+        font-size: 96px;
+    }
+    
+    .immersive-right-section {
+        min-width: 350px;
+    }
+}
+
+@media (max-width: 900px) {
+    .immersive-content {
+        padding: 40px 20px 30px 20px;
+        gap: 30px;
+    }
+    
+    .immersive-cover-stack {
+        width: 350px;
+        height: 350px;
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(1) {
+        width: 315px;
+        height: 315px;
+        font-size: 70px;
+        transform: translate(10px, 10px);
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(2) {
+        width: 336px;
+        height: 336px;
+        font-size: 77px;
+        transform: translate(7px, 7px);
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(3) {
+        width: 350px;
+        height: 350px;
+        font-size: 84px;
+    }
+    
+    .immersive-song-name {
+        font-size: 28px;
+    }
+    
+    .immersive-artist-name {
+        font-size: 16px;
+    }
+    
+    .immersive-right-section {
+        min-width: 100%;
+    }
+    
+    .immersive-lyrics {
+        min-height: 250px;
+        max-height: 400px;
+        font-size: 16px;
+    }
+    
+    .lyric-line.active {
+        font-size: 22px;
+    }
+    
+    .immersive-controls {
+        max-width: 100%;
+        padding: 20px 0;
+    }
+    
+    .immersive-play-button {
+        width: 60px !important;
+        height: 60px !important;
+        font-size: 28px !important;
+    }
+}
+
+@media (max-width: 600px) {
+    .immersive-content {
+        padding: 30px 15px 20px 15px;
+        gap: 25px;
+    }
+    
+    .immersive-cover-stack {
+        width: 280px;
+        height: 280px;
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(1) {
+        width: 252px;
+        height: 252px;
+        font-size: 56px;
+        transform: translate(8px, 8px);
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(2) {
+        width: 269px;
+        height: 269px;
+        font-size: 62px;
+        transform: translate(5px, 5px);
+    }
+    
+    .immersive-cover-stack .immersive-cover-layer:nth-child(3) {
+        width: 280px;
+        height: 280px;
+        font-size: 67px;
+    }
+    
+    .immersive-song-name {
+        font-size: 24px;
+    }
+    
+    .immersive-artist-name {
+        font-size: 14px;
+    }
+    
+    .immersive-current-song {
+        font-size: 12px;
+        padding: 10px 16px;
+    }
+    
+    .immersive-lyrics {
+        min-height: 200px;
+        max-height: 350px;
+        font-size: 15px;
+        padding: 20px 15px;
+    }
+    
+    .lyric-line {
+        margin: 10px 0;
+        font-size: 15px;
+    }
+    
+    .lyric-line.active {
+        font-size: 20px;
+    }
+    
+    .immersive-credits {
+        font-size: 12px;
+        padding: 15px;
+    }
+    
+    .immersive-progress-container {
+        gap: 12px;
+    }
+    
+    .immersive-time {
+        font-size: 12px;
+        min-width: 40px;
+    }
+    
+    .immersive-control-buttons {
+        gap: 25px;
+    }
+    
+    .immersive-play-button {
+        width: 56px !important;
+        height: 56px !important;
+        font-size: 24px !important;
+    }
+    
+    .immersive-close-btn {
+        width: 36px;
+        height: 36px;
+        font-size: 18px;
+        top: 15px;
+        right: 15px;
+    }
+}
+
+.musicplayer-container {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+    background: #1e1e1e;
+    color: #e0e0e0;
+    overflow: hidden;
+    position: relative;
+}
+
+/* 加载动画 */
+@keyframes spin {
+    from {
+        transform: rotate(0deg);
+    }
+    to {
+        transform: rotate(360deg);
+    }
+}
+
+@keyframes fadeInUp {
+    from {
+        opacity: 0;
+        transform: translateY(20px);
+    }
+    to {
+        opacity: 1;
+        transform: translateY(0);
+    }
+}
+
+@keyframes shimmer {
+    0% {
+        background-position: -1000px 0;
+    }
+    100% {
+        background-position: 1000px 0;
+    }
+}
+
+.loading-spinner {
+    display: inline-block;
+    width: 20px;
+    height: 20px;
+    border: 3px solid rgba(236, 65, 65, 0.3);
+    border-top-color: #ec4141;
+    border-radius: 50%;
+    animation: spin 1s linear infinite;
+}
+
+.loading-overlay {
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(30, 30, 30, 0.9);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    backdrop-filter: blur(5px);
+    animation: fadeIn 0.3s ease;
+}
+
+.loading-content {
+    text-align: center;
+    color: #e0e0e0;
+}
+
+.loading-content .loading-spinner {
+    margin: 0 auto 10px;
+    width: 40px;
+    height: 40px;
+    border-width: 4px;
+}
+
+.skeleton {
+    background: linear-gradient(90deg, #2a2a2a 25%, #333 50%, #2a2a2a 75%);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-radius: 4px;
+}
+
+/* 顶部搜索栏 */
+.musicplayer-topbar {
+    height: 60px;
+    background: linear-gradient(180deg, #2a2a2a 0%, #252525 100%);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 20px;
+    flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
+}
+
+/* 左侧边栏 */
+.musicplayer-sidebar {
+    width: 200px;
+    background: linear-gradient(180deg, #1a1a1a 0%, #181818 100%);
+    border-right: 1px solid rgba(255, 255, 255, 0.08);
+    display: flex;
+    flex-direction: column;
+    padding: 20px 0;
+    flex-shrink: 0;
+    overflow-y: auto;
+    box-shadow: inset -1px 0 10px rgba(0, 0, 0, 0.3);
+}
+
+.sidebar-menu-item {
+    padding: 12px 20px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    color: #b3b3b3;
+    position: relative;
+    overflow: hidden;
+}
+
+.sidebar-menu-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: #ec4141;
+    transform: scaleY(0);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transform-origin: bottom;
+}
+
+.sidebar-menu-item:hover {
+    background: linear-gradient(90deg, rgba(37, 37, 37, 0.8) 0%, rgba(42, 42, 42, 0.6) 100%);
+    color: #e0e0e0;
+    transform: translateX(3px);
+    padding-left: 23px;
+}
+
+.sidebar-menu-item:hover::before {
+    transform: scaleY(1);
+}
+
+.sidebar-menu-item.active {
+    background: linear-gradient(90deg, rgba(42, 42, 42, 0.9) 0%, rgba(37, 37, 37, 0.7) 100%);
+    color: #ec4141;
+    border-left: 3px solid #ec4141;
+    padding-left: 17px;
+    font-weight: 600;
+    box-shadow: inset 0 0 20px rgba(236, 65, 65, 0.1);
+}
+
+.sidebar-menu-item.active::before {
+    transform: scaleY(1);
+}
+
+.sidebar-menu-item span:first-child {
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    display: inline-block;
+}
+
+.sidebar-menu-item:hover span:first-child,
+.sidebar-menu-item.active span:first-child {
+    transform: scale(1.2) rotate(5deg);
+}
+
+/* 主内容区 */
+.musicplayer-main {
+    flex: 1;
+    overflow-y: auto;
+    background: linear-gradient(180deg, #1e1e1e 0%, #1a1a1a 100%);
+    padding: 20px;
+    position: relative;
+}
+
+/* 歌曲列表项通用样式 */
+.search-item,
+.rank-item,
+.playlist-detail-item,
+.artist-song-item,
+.daily-item {
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+.search-item::before,
+.rank-item::before,
+.playlist-detail-item::before,
+.artist-song-item::before,
+.daily-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 3px;
+    height: 100%;
+    background: #ec4141;
+    transform: scaleY(0);
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    transform-origin: bottom;
+}
+
+.search-item:hover,
+.rank-item:hover,
+.playlist-detail-item:hover,
+.artist-song-item:hover,
+.daily-item:hover {
+    background: linear-gradient(90deg, rgba(236, 65, 65, 0.1) 0%, rgba(42, 42, 42, 0.8) 100%) !important;
+    transform: translateX(5px);
+    box-shadow: -3px 0 10px rgba(236, 65, 65, 0.2);
+}
+
+.search-item:hover::before,
+.rank-item:hover::before,
+.playlist-detail-item:hover::before,
+.artist-song-item:hover::before,
+.daily-item:hover::before {
+    transform: scaleY(1);
+}
+
+.search-item:active,
+.rank-item:active,
+.playlist-detail-item:active,
+.artist-song-item:active,
+.daily-item:active {
+    transform: translateX(3px) scale(0.98);
+}
+
+/* 热门搜索标签 */
+.hot-search-item {
+    padding: 8px 16px;
+    background: rgba(42, 42, 42, 0.8);
+    border-radius: 20px;
+    cursor: pointer;
+    font-size: 14px;
+    display: inline-block;
+    margin: 5px;
+    border: 1px solid transparent;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    color: #e0e0e0;
+}
+
+.hot-search-item:hover {
+    background: linear-gradient(135deg, #ec4141 0%, #d63636 100%) !important;
+    transform: translateY(-2px) scale(1.05);
+    box-shadow: 0 4px 12px rgba(236, 65, 65, 0.4);
+    color: #ffffff !important;
+    border-color: rgba(236, 65, 65, 0.5);
+}
+
+/* 歌单卡片 */
+.playlist-item {
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+}
+
+.playlist-item::after {
+    content: '';
+    position: absolute;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: linear-gradient(180deg, transparent 0%, rgba(0, 0, 0, 0.6) 100%);
+    opacity: 0;
+    transition: opacity 0.3s;
+}
+
+.playlist-item:hover {
+    transform: translateY(-8px) scale(1.02) !important;
+    box-shadow: 0 12px 24px rgba(0, 0, 0, 0.5);
+}
+
+.playlist-item:hover::after {
+    opacity: 1;
+}
+
+/* 歌手卡片 */
+.artist-item {
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+}
+
+.artist-item img {
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    border: 3px solid transparent;
+}
+
+.artist-item:hover {
+    transform: translateY(-8px) scale(1.05) !important;
+}
+
+.artist-item:hover img {
+    border-color: #ec4141;
+    box-shadow: 0 8px 20px rgba(236, 65, 65, 0.4);
+}
+
+.musicplayer-main::-webkit-scrollbar {
+    width: 8px;
+}
+
+.musicplayer-main::-webkit-scrollbar-track {
+    background: #1a1a1a;
+}
+
+.musicplayer-main::-webkit-scrollbar-thumb {
+    background: #3a3a3a;
+    border-radius: 4px;
+}
+
+.musicplayer-main::-webkit-scrollbar-thumb:hover {
+    background: #4a4a4a;
+}
+
+/* 底部播放栏 */
+.musicplayer-playerbar {
+    height: 80px;
+    background: linear-gradient(180deg, #252525 0%, #1f1f1f 100%);
+    border-top: 1px solid rgba(255, 255, 255, 0.1);
+    display: flex;
+    align-items: center;
+    padding: 0 20px;
+    gap: 20px;
+    flex-shrink: 0;
+    box-shadow: 0 -2px 10px rgba(0, 0, 0, 0.3);
+    backdrop-filter: blur(10px);
+}
+
+.player-cover {
+    width: 60px;
+    height: 60px;
+    background: #2a2a2a;
+    border-radius: 8px;
+    overflow: hidden;
+    flex-shrink: 0;
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+    cursor: pointer;
+}
+
+.player-cover:hover {
+    transform: scale(1.1) rotate(5deg);
+    box-shadow: 0 6px 20px rgba(236, 65, 65, 0.4);
+}
+
+.player-cover img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.player-cover:hover img {
+    transform: scale(1.1);
+}
+
+.player-info {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+}
+
+.player-song-name {
+    font-size: 14px;
+    font-weight: 500;
+    color: #e0e0e0;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.player-artist-name {
+    font-size: 12px;
+    color: #999;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+}
+
+.player-controls {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 8px;
+    flex: 1;
+}
+
+.player-controls > div:first-child {
+    display: flex;
+    align-items: center;
+    gap: 15px;
+}
+
+.play-button {
+    width: 42px !important;
+    height: 42px !important;
+    background: linear-gradient(135deg, #ec4141 0%, #d63636 100%) !important;
+    color: white !important;
+    font-size: 20px !important;
+    box-shadow: 0 4px 12px rgba(236, 65, 65, 0.4);
+    transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1) !important;
+}
+
+.play-button:hover {
+    background: linear-gradient(135deg, #d63636 0%, #c02e2e 100%) !important;
+    transform: scale(1.1);
+    box-shadow: 0 6px 20px rgba(236, 65, 65, 0.6);
+}
+
+.play-button:active {
+    transform: scale(0.95);
+}
+
+.progress-bar {
+    flex: 1;
+    height: 4px;
+    background: rgba(58, 58, 58, 0.6);
+    border-radius: 2px;
+    cursor: pointer;
+    position: relative;
+    transition: height 0.2s;
+}
+
+.progress-bar:hover {
+    height: 6px;
+}
+
+.progress-bar:hover .progress-fill {
+    box-shadow: 0 0 10px rgba(236, 65, 65, 0.6);
+}
+
+.progress-fill {
+    height: 100%;
+    background: linear-gradient(90deg, #ec4141 0%, #ff6b6b 100%);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.1s, box-shadow 0.2s;
+    position: relative;
+}
+
+.progress-fill::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 12px;
+    height: 12px;
+    background: #ec4141;
+    border-radius: 50%;
+    opacity: 0;
+    transition: opacity 0.2s;
+    box-shadow: 0 0 8px rgba(236, 65, 65, 0.8);
+}
+
+.progress-bar:hover .progress-fill::after {
+    opacity: 1;
+}
+
+.time-current,
+.time-total {
+    font-size: 12px;
+    color: #999;
+    min-width: 40px;
+    text-align: center;
+}
+
+.player-volume {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    min-width: 120px;
+}
+
+.volume-bar {
+    flex: 1;
+    height: 4px;
+    background: #3a3a3a;
+    border-radius: 2px;
+    cursor: pointer;
+    position: relative;
+}
+
+.volume-fill {
+    height: 100%;
+    background: #ec4141;
+    border-radius: 2px;
+    width: 70%;
+}
+
+/* 热门搜索 - 已在上方定义，此处删除重复 */
+
+/* 歌单列表 */
+.playlist-item {
+    cursor: pointer;
+    transition: transform 0.2s;
+}
+
+.playlist-item:hover {
+    transform: translateY(-5px);
+}
+
+/* 排行榜 */
+.rank-list {
+    background: #252525;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.rank-item {
+    display: flex;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid #333;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.rank-item:hover {
+    background: #2a2a2a;
+}
+
+.rank-item:last-child {
+    border-bottom: none;
+}
+
+/* 歌手列表 */
+.artist-item {
+    cursor: pointer;
+    text-align: center;
+    transition: transform 0.2s;
+}
+
+.artist-item:hover {
+    transform: translateY(-5px);
+}
+
+/* 搜索列表 */
+.search-list,
+.playlist-detail-list,
+.artist-songs-list,
+.daily-list {
+    background: #252525;
+    border-radius: 8px;
+    overflow: hidden;
+}
+
+.search-item,
+.playlist-detail-item,
+.artist-song-item,
+.daily-item {
+    display: flex;
+    align-items: center;
+    padding: 12px 20px;
+    border-bottom: 1px solid #333;
+    cursor: pointer;
+    transition: background 0.2s;
+}
+
+.search-item:hover,
+.playlist-detail-item:hover,
+.artist-song-item:hover,
+.daily-item:hover {
+    background: #2a2a2a;
+}
+
+.search-item:last-child,
+.playlist-detail-item:last-child,
+.artist-song-item:last-child,
+.daily-item:last-child {
+    border-bottom: none;
+}
+
+/* 返回按钮 */
+.back-button {
+    padding: 8px 16px;
+    background: #2a2a2a;
+    border: none;
+    border-radius: 4px;
+    color: #e0e0e0;
+    cursor: pointer;
+    margin-bottom: 20px;
+    transition: background 0.2s;
+}
+
+.back-button:hover {
+    background: #3a3a3a;
+}
+
+/* 响应式设计 */
+@media (max-width: 1000px) {
+    .musicplayer-sidebar {
+        width: 160px;
+    }
+    
+    .player-volume {
+        min-width: 80px;
+    }
+}
+
