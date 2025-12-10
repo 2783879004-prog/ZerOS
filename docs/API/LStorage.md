@@ -19,7 +19,7 @@
     },
     programs: {
         // 程序的本地数据
-        [pid: number]: {
+        [name: string]: {
             [key: string]: any
         }
     }

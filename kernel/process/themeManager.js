@@ -25,12 +25,22 @@ class ThemeManager {
     static STORAGE_KEY_THEME = 'system.theme';
     static STORAGE_KEY_STYLE = 'system.style';
     static STORAGE_KEY_DESKTOP_BACKGROUND = 'system.desktopBackground';
+    static STORAGE_KEY_ANIMATION_PRESET = 'system.animationPreset';
     
     // 当前桌面背景图ID
     static _currentDesktopBackgroundId = null;
     
     // 桌面背景图定义
     static _desktopBackgrounds = new Map();
+    
+    // 当前动画预设ID
+    static _currentAnimationPresetId = null;
+    
+    // 动画预设定义
+    static _animationPresets = new Map();
+    
+    // 动画预设变更监听器
+    static _animationPresetChangeListeners = [];
     
     /**
      * 初始化主题管理器
@@ -50,6 +60,9 @@ class ThemeManager {
         
         // 注册内置桌面背景图
         ThemeManager._registerBuiltinDesktopBackgrounds();
+        
+        // 注册内置动画预设
+        ThemeManager._registerBuiltinAnimationPresets();
         
         // 从 LStorage 加载保存的主题和风格
         if (typeof LStorage !== 'undefined') {
@@ -79,6 +92,31 @@ class ThemeManager {
                     if (ThemeManager._desktopBackgrounds.has(trimmedId)) {
                         ThemeManager._currentDesktopBackgroundId = trimmedId;
                         KernelLogger.info("ThemeManager", `加载保存的桌面背景: ${trimmedId}`);
+                    } else if (trimmedId.startsWith('local_')) {
+                        // 如果是本地图片背景ID，尝试从存储中加载本地背景信息
+                        const localBackgrounds = await LStorage.getSystemStorage('system.localDesktopBackgrounds');
+                        if (localBackgrounds && Array.isArray(localBackgrounds)) {
+                            // 查找匹配的本地背景
+                            const localBg = localBackgrounds.find(bg => bg && bg.id === trimmedId);
+                            if (localBg && localBg.path) {
+                                // 重新注册本地背景
+                                ThemeManager.registerDesktopBackground(localBg.id, {
+                                    id: localBg.id,
+                                    name: localBg.name || localBg.id,
+                                    description: localBg.description || `本地图片: ${localBg.path}`,
+                                    path: localBg.path
+                                });
+                                ThemeManager._currentDesktopBackgroundId = trimmedId;
+                                KernelLogger.info("ThemeManager", `重新注册并加载本地桌面背景: ${trimmedId} (${localBg.path})`);
+                            } else {
+                                KernelLogger.warn("ThemeManager", `保存的本地桌面背景 ${trimmedId} 信息不存在，使用默认背景`);
+                                ThemeManager._currentDesktopBackgroundId = 'default';
+                            }
+                        } else {
+                            // 如果没有保存的本地背景列表，尝试从ID中提取路径（向后兼容）
+                            KernelLogger.warn("ThemeManager", `保存的本地桌面背景 ${trimmedId} 未找到，使用默认背景`);
+                            ThemeManager._currentDesktopBackgroundId = 'default';
+                        }
                     } else {
                         KernelLogger.warn("ThemeManager", `保存的桌面背景 ${trimmedId} 不存在，使用默认背景`);
                         ThemeManager._currentDesktopBackgroundId = 'default';
@@ -106,7 +144,7 @@ class ThemeManager {
         // 应用当前主题和风格
         ThemeManager._applyTheme(ThemeManager._currentThemeId);
         ThemeManager._applyStyle(ThemeManager._currentStyleId);
-        ThemeManager._applyDesktopBackground(ThemeManager._currentDesktopBackgroundId);
+        await ThemeManager._applyDesktopBackground(ThemeManager._currentDesktopBackgroundId);
         
         ThemeManager._initialized = true;
         KernelLogger.info("ThemeManager", "主题管理器初始化完成");
@@ -1381,6 +1419,389 @@ class ThemeManager {
     }
     
     /**
+     * 注册内置动画预设
+     */
+    static _registerBuiltinAnimationPresets() {
+        // 预设1：流畅（Smooth）- 默认预设，平衡性能和流畅度
+        ThemeManager.registerAnimationPreset('smooth', {
+            id: 'smooth',
+            name: '流畅',
+            description: '平衡性能和流畅度，适合大多数用户，动画时长适中',
+            config: {
+                // 窗口动画
+                WINDOW: {
+                    OPEN: { duration: 150, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 120, easing: 'easeInCubic' },
+                    MINIMIZE: { duration: 150, easing: 'easeInCubic' },
+                    RESTORE: { duration: 150, easing: 'easeOutCubic' }
+                },
+                // 菜单动画
+                MENU: {
+                    OPEN: { duration: 100, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 100, easing: 'easeInCubic' }
+                },
+                // 对话框动画
+                DIALOG: {
+                    OPEN: { duration: 300, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 300, easing: 'easeInCubic' }
+                },
+                // 通知动画
+                NOTIFICATION: {
+                    SHOW: { duration: 400, easing: 'easeOutCubic' },
+                    HIDE: { duration: 400, easing: 'easeInCubic' }
+                },
+                // 按钮动画
+                BUTTON: {
+                    CLICK: { duration: 150, easing: 'easeOutCubic' },
+                    HOVER: { duration: 200, easing: 'easeOutCubic' }
+                },
+                // 面板动画
+                PANEL: {
+                    OPEN: { duration: 150, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 80, easing: 'easeInCubic' }
+                }
+            }
+        });
+        
+        // 预设2：快速（Fast）- 快速响应，动画时长较短
+        ThemeManager.registerAnimationPreset('fast', {
+            id: 'fast',
+            name: '快速',
+            description: '快速响应，动画时长较短，适合追求效率的用户',
+            config: {
+                WINDOW: {
+                    OPEN: { duration: 100, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 80, easing: 'easeInCubic' },
+                    MINIMIZE: { duration: 100, easing: 'easeInCubic' },
+                    RESTORE: { duration: 100, easing: 'easeOutCubic' }
+                },
+                MENU: {
+                    OPEN: { duration: 60, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 60, easing: 'easeInCubic' }
+                },
+                DIALOG: {
+                    OPEN: { duration: 200, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 200, easing: 'easeInCubic' }
+                },
+                NOTIFICATION: {
+                    SHOW: { duration: 250, easing: 'easeOutCubic' },
+                    HIDE: { duration: 250, easing: 'easeInCubic' }
+                },
+                BUTTON: {
+                    CLICK: { duration: 100, easing: 'easeOutCubic' },
+                    HOVER: { duration: 150, easing: 'easeOutCubic' }
+                },
+                PANEL: {
+                    OPEN: { duration: 100, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 50, easing: 'easeInCubic' }
+                }
+            }
+        });
+        
+        // 预设3：优雅（Elegant）- 较慢的动画，更优雅的过渡效果
+        ThemeManager.registerAnimationPreset('elegant', {
+            id: 'elegant',
+            name: '优雅',
+            description: '较慢的动画，更优雅的过渡效果，适合注重视觉体验的用户',
+            config: {
+                WINDOW: {
+                    OPEN: { duration: 300, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 250, easing: 'easeInCubic' },
+                    MINIMIZE: { duration: 300, easing: 'easeInCubic' },
+                    RESTORE: { duration: 300, easing: 'easeOutCubic' }
+                },
+                MENU: {
+                    OPEN: { duration: 200, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 200, easing: 'easeInCubic' }
+                },
+                DIALOG: {
+                    OPEN: { duration: 400, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 400, easing: 'easeInCubic' }
+                },
+                NOTIFICATION: {
+                    SHOW: { duration: 500, easing: 'easeOutCubic' },
+                    HIDE: { duration: 500, easing: 'easeInCubic' }
+                },
+                BUTTON: {
+                    CLICK: { duration: 250, easing: 'easeOutCubic' },
+                    HOVER: { duration: 300, easing: 'easeOutCubic' }
+                },
+                PANEL: {
+                    OPEN: { duration: 250, easing: 'easeOutCubic' },
+                    CLOSE: { duration: 150, easing: 'easeInCubic' }
+                }
+            }
+        });
+        
+        // 预设4：弹性（Bouncy）- 使用弹性缓动函数，更有活力的动画
+        ThemeManager.registerAnimationPreset('bouncy', {
+            id: 'bouncy',
+            name: '弹性',
+            description: '使用弹性缓动函数，更有活力的动画效果，充满动感',
+            config: {
+                WINDOW: {
+                    OPEN: { duration: 200, easing: 'spring(1, 100, 8, 0)' },
+                    CLOSE: { duration: 150, easing: 'easeInCubic' },
+                    MINIMIZE: { duration: 150, easing: 'easeInCubic' },
+                    RESTORE: { duration: 200, easing: 'spring(1, 100, 8, 0)' }
+                },
+                MENU: {
+                    OPEN: { duration: 150, easing: 'spring(1, 80, 10, 0)' },
+                    CLOSE: { duration: 100, easing: 'easeInCubic' }
+                },
+                DIALOG: {
+                    OPEN: { duration: 350, easing: 'spring(1, 100, 8, 0)' },
+                    CLOSE: { duration: 300, easing: 'easeInCubic' }
+                },
+                NOTIFICATION: {
+                    SHOW: { duration: 400, easing: 'spring(1, 80, 10, 0)' },
+                    HIDE: { duration: 400, easing: 'easeInCubic' }
+                },
+                BUTTON: {
+                    CLICK: { duration: 200, easing: 'spring(1, 100, 8, 0)' },
+                    HOVER: { duration: 200, easing: 'easeOutCubic' }
+                },
+                PANEL: {
+                    OPEN: { duration: 200, easing: 'spring(1, 80, 10, 0)' },
+                    CLOSE: { duration: 100, easing: 'easeInCubic' }
+                }
+            }
+        });
+        
+        KernelLogger.info("ThemeManager", `已注册 ${ThemeManager._animationPresets.size} 个内置动画预设`);
+    }
+    
+    /**
+     * 注册动画预设
+     * @param {string} presetId 预设ID
+     * @param {Object} preset 预设配置 { id, name, description, config }
+     * @returns {boolean} 是否注册成功
+     */
+    static registerAnimationPreset(presetId, preset) {
+        if (!presetId || !preset) {
+            KernelLogger.warn("ThemeManager", "注册动画预设失败：presetId 或 preset 为空");
+            return false;
+        }
+        
+        if (!preset.config || typeof preset.config !== 'object') {
+            KernelLogger.warn("ThemeManager", `注册动画预设失败：预设 ${presetId} 缺少 config 配置`);
+            return false;
+        }
+        
+        ThemeManager._animationPresets.set(presetId, {
+            id: presetId,
+            name: preset.name || presetId,
+            description: preset.description || '',
+            config: preset.config
+        });
+        
+        KernelLogger.debug("ThemeManager", `注册动画预设: ${presetId} - ${preset.name || presetId}`);
+        return true;
+    }
+    
+    /**
+     * 设置动画预设
+     * @param {string} presetId 预设ID
+     * @param {boolean} save 是否保存到 LStorage（默认 true）
+     * @returns {Promise<boolean>} 是否设置成功
+     */
+    static async setAnimationPreset(presetId, save = true) {
+        if (!ThemeManager._initialized) {
+            await ThemeManager.init();
+        }
+        
+        if (!ThemeManager._animationPresets.has(presetId)) {
+            KernelLogger.warn("ThemeManager", `动画预设不存在: ${presetId}`);
+            return false;
+        }
+        
+        // 应用动画预设
+        ThemeManager._applyAnimationPreset(presetId);
+        
+        // 保存到 LStorage
+        if (save && typeof LStorage !== 'undefined') {
+            try {
+                await LStorage.setSystemStorage(ThemeManager.STORAGE_KEY_ANIMATION_PRESET, presetId);
+                KernelLogger.debug("ThemeManager", `动画预设已保存: ${presetId}`);
+            } catch (e) {
+                KernelLogger.warn("ThemeManager", `保存动画预设失败: ${e.message}`);
+            }
+        }
+        
+        // 通知监听器
+        ThemeManager._notifyAnimationPresetChange(presetId);
+        
+        KernelLogger.info("ThemeManager", `动画预设已切换: ${presetId}`);
+        return true;
+    }
+    
+    /**
+     * 应用动画预设到 AnimateManager
+     * @param {string} presetId 预设ID
+     */
+    static _applyAnimationPreset(presetId) {
+        const preset = ThemeManager._animationPresets.get(presetId);
+        if (!preset) {
+            KernelLogger.warn("ThemeManager", `应用动画预设失败：预设 ${presetId} 不存在`);
+            return;
+        }
+        
+        ThemeManager._currentAnimationPresetId = presetId;
+        
+        // 如果 AnimateManager 可用，更新其动画预设
+        if (typeof AnimateManager !== 'undefined' && typeof POOL !== 'undefined') {
+            try {
+                // 获取 ANIMATION_PRESETS
+                const animationPresets = POOL.__GET__("KERNEL_GLOBAL_POOL", "ANIMATION_PRESETS");
+                if (animationPresets && typeof animationPresets === 'object') {
+                    // 更新动画预设的时长和缓动函数
+                    const presetConfig = preset.config;
+                    for (const [category, actions] of Object.entries(presetConfig)) {
+                        if (animationPresets[category]) {
+                            for (const [action, config] of Object.entries(actions)) {
+                                if (animationPresets[category][action]) {
+                                    // 更新时长和缓动函数
+                                    if (config.duration !== undefined) {
+                                        animationPresets[category][action].duration = config.duration;
+                                    }
+                                    if (config.easing !== undefined) {
+                                        animationPresets[category][action].easing = config.easing;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    KernelLogger.debug("ThemeManager", `动画预设已应用到 AnimateManager: ${presetId}`);
+                }
+            } catch (e) {
+                KernelLogger.warn("ThemeManager", `应用动画预设到 AnimateManager 失败: ${e.message}`);
+            }
+        }
+    }
+    
+    /**
+     * 获取当前动画预设ID
+     * @returns {string} 当前动画预设ID
+     */
+    static getCurrentAnimationPresetId() {
+        return ThemeManager._currentAnimationPresetId || 'smooth';
+    }
+    
+    /**
+     * 获取当前动画预设配置
+     * @returns {Object|null} 当前动画预设配置
+     */
+    static getCurrentAnimationPreset() {
+        const presetId = ThemeManager._currentAnimationPresetId || 'smooth';
+        const preset = ThemeManager._animationPresets.get(presetId);
+        // 如果预设不存在，尝试返回默认预设
+        if (!preset && presetId !== 'smooth') {
+            return ThemeManager._animationPresets.get('smooth') || null;
+        }
+        return preset || null;
+    }
+    
+    /**
+     * 获取所有动画预设列表
+     * @returns {Array<Object>} 动画预设列表
+     */
+    static getAllAnimationPresets() {
+        return Array.from(ThemeManager._animationPresets.values()).map(preset => ({
+            id: preset.id,
+            name: preset.name,
+            description: preset.description
+        }));
+    }
+    
+    /**
+     * 获取动画预设配置
+     * @param {string} presetId 预设ID
+     * @returns {Object|null} 动画预设配置
+     */
+    static getAnimationPreset(presetId) {
+        return ThemeManager._animationPresets.get(presetId) || null;
+    }
+    
+    /**
+     * 添加动画预设变更监听器
+     * @param {Function} listener 监听器函数
+     * @returns {Function} 取消监听的函数
+     */
+    static onAnimationPresetChange(listener) {
+        if (typeof listener !== 'function') {
+            KernelLogger.warn("ThemeManager", "监听器必须是函数");
+            return () => {};
+        }
+        
+        ThemeManager._animationPresetChangeListeners.push(listener);
+        
+        // 立即调用一次，传递当前预设
+        try {
+            const currentPresetId = ThemeManager._currentAnimationPresetId || ThemeManager.getCurrentAnimationPresetId();
+            const currentPreset = ThemeManager.getCurrentAnimationPreset();
+            // 如果预设为 null，尝试使用默认预设
+            if (!currentPreset && currentPresetId) {
+                // 如果预设不存在，使用默认的 'smooth' 预设
+                const defaultPreset = ThemeManager._animationPresets.get('smooth');
+                if (defaultPreset) {
+                    listener('smooth', defaultPreset);
+                } else {
+                    // 如果连默认预设都没有，传递 null
+                    listener(currentPresetId, null);
+                }
+            } else {
+                listener(currentPresetId, currentPreset);
+            }
+        } catch (e) {
+            KernelLogger.warn("ThemeManager", `动画预设变更监听器初始化失败: ${e.message}`);
+        }
+        
+        return () => {
+            const index = ThemeManager._animationPresetChangeListeners.indexOf(listener);
+            if (index > -1) {
+                ThemeManager._animationPresetChangeListeners.splice(index, 1);
+            }
+        };
+    }
+    
+    /**
+     * 移除动画预设变更监听器
+     * @param {Function} listener 监听器函数
+     */
+    static offAnimationPresetChange(listener) {
+        const index = ThemeManager._animationPresetChangeListeners.indexOf(listener);
+        if (index > -1) {
+            ThemeManager._animationPresetChangeListeners.splice(index, 1);
+        }
+    }
+    
+    /**
+     * 通知动画预设变更
+     * @param {string} presetId 新预设ID
+     */
+    static _notifyAnimationPresetChange(presetId) {
+        const preset = ThemeManager.getCurrentAnimationPreset();
+        ThemeManager._animationPresetChangeListeners.forEach(listener => {
+            try {
+                // 确保 preset 不为 null，如果为 null 则传递默认预设
+                if (preset) {
+                    listener(presetId, preset);
+                } else {
+                    // 如果预设不存在，尝试使用默认预设
+                    const defaultPreset = ThemeManager._animationPresets.get('smooth');
+                    if (defaultPreset) {
+                        listener('smooth', defaultPreset);
+                    } else {
+                        listener(presetId, null);
+                    }
+                }
+            } catch (e) {
+                KernelLogger.warn("ThemeManager", `动画预设变更监听器执行失败: ${e.message}`);
+            }
+        });
+    }
+    
+    /**
      * 注册桌面背景图
      * @param {string} backgroundId 背景图ID
      * @param {Object} background 背景图配置 { id, name, description, path }
@@ -1430,7 +1851,7 @@ class ThemeManager {
         }
         
         // 应用桌面背景
-        ThemeManager._applyDesktopBackground(backgroundId);
+        await ThemeManager._applyDesktopBackground(backgroundId);
         
         // 更新当前背景ID（立即更新，即使保存失败）
         ThemeManager._currentDesktopBackgroundId = backgroundId;
@@ -1465,10 +1886,16 @@ class ThemeManager {
      * 应用桌面背景图到 DOM
      * @param {string} backgroundId 背景图ID
      */
-    static _applyDesktopBackground(backgroundId) {
+    static async _applyDesktopBackground(backgroundId) {
         const background = ThemeManager._desktopBackgrounds.get(backgroundId);
         if (!background) {
             KernelLogger.warn("ThemeManager", `应用桌面背景失败：背景 ${backgroundId} 不存在`);
+            // 回退到默认背景
+            const defaultBackground = ThemeManager._desktopBackgrounds.get('default');
+            if (defaultBackground) {
+                KernelLogger.info("ThemeManager", "回退到默认背景");
+                await ThemeManager._applyDesktopBackground('default');
+            }
             return;
         }
         
@@ -1481,20 +1908,211 @@ class ThemeManager {
             return;
         }
         
+        // 检查是否是本地图片路径（以 C: 或 D: 开头，或包含 /service/DISK/）
+        const isLocalPath = background.path.startsWith('C:') || 
+                           background.path.startsWith('D:') || 
+                           background.path.includes('/service/DISK/');
+        
+        let imageUrl = background.path;
+        
+        // 如果是本地路径，转换为 PHP 服务 URL
+        if (isLocalPath) {
+            // 检查图片是否存在
+            const exists = await ThemeManager._checkImageExists(background.path);
+            if (!exists) {
+                KernelLogger.warn("ThemeManager", `本地图片不存在: ${background.path}，回退到默认背景`);
+                const defaultBackground = ThemeManager._desktopBackgrounds.get('default');
+                if (defaultBackground) {
+                    await ThemeManager._applyDesktopBackground('default');
+                }
+                return;
+            }
+            
+            // 转换为 PHP 服务 URL
+            // 例如: C:/path/to/image.jpg -> /service/DISK/C/path/to/image.jpg
+            // 例如: D:/path/to/image.jpg -> /service/DISK/D/path/to/image.jpg
+            if (background.path.startsWith('C:')) {
+                imageUrl = '/service/DISK/C' + background.path.substring(2).replace(/\\/g, '/');
+            } else if (background.path.startsWith('D:')) {
+                imageUrl = '/service/DISK/D' + background.path.substring(2).replace(/\\/g, '/');
+            } else if (background.path.includes('/service/DISK/')) {
+                imageUrl = background.path;
+            }
+        }
+        
+        // 检测图片类型（通过文件扩展名）
+        const imageExtension = background.path.toLowerCase().split('.').pop() || '';
+        const isGif = imageExtension === 'gif';
+        const isAnimated = isGif; // GIF 通常是动画的
+        
         // 应用背景图
-        guiContainer.style.backgroundImage = `url('${background.path}')`;
-        guiContainer.style.backgroundSize = 'cover';
+        guiContainer.style.backgroundImage = `url('${imageUrl}')`;
+        guiContainer.style.backgroundSize = 'cover';  // 确保图片占满全屏
         guiContainer.style.backgroundPosition = 'center';
         guiContainer.style.backgroundRepeat = 'no-repeat';
         guiContainer.style.backgroundAttachment = 'fixed';
         
+        // 对于 GIF 动图，确保动画能够播放
+        // 注意：CSS background-image 中的 GIF 会自动播放动画，无需特殊处理
+        // 但为了更好的性能和兼容性，我们可以添加一些优化
+        if (isGif) {
+            // 确保 GIF 动画能够正常播放
+            // CSS background-image 中的 GIF 会自动循环播放
+            // 不需要额外的设置，但可以添加一些提示
+            KernelLogger.debug("ThemeManager", `检测到 GIF 动图背景: ${backgroundId}`);
+        }
+        
         // 设置 CSS 变量（供其他地方使用）
         const root = document.documentElement;
         if (root) {
-            root.style.setProperty('--desktop-background-image', `url('${background.path}')`);
+            root.style.setProperty('--desktop-background-image', `url('${imageUrl}')`);
+            // 添加图片类型标记（供 CSS 使用）
+            if (isGif) {
+                root.style.setProperty('--desktop-background-type', 'gif');
+            } else {
+                root.style.setProperty('--desktop-background-type', 'static');
+            }
         }
         
-        KernelLogger.debug("ThemeManager", `桌面背景已应用到DOM: ${backgroundId}`);
+        KernelLogger.debug("ThemeManager", `桌面背景已应用到DOM: ${backgroundId} (${imageUrl}, 类型: ${isGif ? 'GIF动图' : '静态图片'})`);
+    }
+    
+    /**
+     * 检查本地图片是否存在
+     * @param {string} imagePath 图片路径（C: 或 D: 开头的路径）
+     * @returns {Promise<boolean>} 图片是否存在
+     */ 
+    static async _checkImageExists(imagePath) {
+        try {
+            // 转换为 PHP 服务路径
+            let phpPath = imagePath;
+            if (imagePath.startsWith('C:')) {
+                phpPath = 'C:' + imagePath.substring(2).replace(/\\/g, '/');
+            } else if (imagePath.startsWith('D:')) {
+                phpPath = 'D:' + imagePath.substring(2).replace(/\\/g, '/');
+            }
+            
+            // 确保路径格式正确
+            if (/^[CD]:$/.test(phpPath)) {
+                phpPath = phpPath + '/';
+            }
+            
+            // 使用 PHP 服务检查文件是否存在
+            const url = new URL('/service/FSDirve.php', window.location.origin);
+            url.searchParams.set('action', 'exists');
+            url.searchParams.set('path', phpPath);
+            
+            const response = await fetch(url.toString());
+            if (!response.ok) {
+                return false;
+            }
+            
+            const result = await response.json();
+            if (result.status === 'success' && result.data && result.data.exists && result.data.type === 'file') {
+                // 检查文件扩展名，支持常见图片格式（包括 GIF）
+                const extension = imagePath.toLowerCase().split('.').pop() || '';
+                const supportedFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+                if (supportedFormats.includes(extension)) {
+                    return true;
+                } else {
+                    KernelLogger.warn("ThemeManager", `不支持的图片格式: ${extension}`);
+                    return false;
+                }
+            }
+            return false;
+        } catch (e) {
+            KernelLogger.warn("ThemeManager", `检查图片存在性失败: ${e.message}`);
+            return false;
+        }
+    }
+    
+    /**
+     * 设置本地图片作为桌面背景
+     * @param {string} imagePath 图片路径（C: 或 D: 开头的路径），支持 JPG、PNG、GIF、WebP、SVG 等格式
+     * @param {boolean} save 是否保存到 LStorage（默认 true）
+     * @returns {Promise<boolean>} 是否设置成功
+     */
+    static async setLocalImageAsBackground(imagePath, save = true) {
+        if (!imagePath || typeof imagePath !== 'string') {
+            KernelLogger.warn("ThemeManager", "设置本地图片背景失败：路径无效");
+            return false;
+        }
+        
+        // 检查文件扩展名，确认是支持的图片格式
+        const extension = imagePath.toLowerCase().split('.').pop() || '';
+        const supportedFormats = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp', 'ico'];
+        if (!supportedFormats.includes(extension)) {
+            KernelLogger.warn("ThemeManager", `不支持的图片格式: ${extension}，支持的格式: ${supportedFormats.join(', ')}`);
+            return false;
+        }
+        
+        // 检查图片是否存在
+        const exists = await ThemeManager._checkImageExists(imagePath);
+        if (!exists) {
+            KernelLogger.warn("ThemeManager", `本地图片不存在: ${imagePath}`);
+            return false;
+        }
+        
+        // 生成唯一的背景ID（使用路径的哈希或直接使用路径）
+        const backgroundId = `local_${imagePath.replace(/[^a-zA-Z0-9]/g, '_')}`;
+        
+        // 从路径中提取文件名作为名称
+        const fileName = imagePath.split(/[/\\]/).pop() || '本地图片';
+        
+        // 检测是否为 GIF 动图
+        const isGif = extension === 'gif';
+        const description = isGif 
+            ? `本地GIF动图: ${imagePath}` 
+            : `本地图片: ${imagePath}`;
+        
+        // 注册或更新本地背景
+        ThemeManager.registerDesktopBackground(backgroundId, {
+            id: backgroundId,
+            name: fileName,
+            description: description,
+            path: imagePath
+        });
+        
+        // 保存本地背景信息到存储（用于重启后恢复）
+        if (save && typeof LStorage !== 'undefined') {
+            try {
+                // 获取现有的本地背景列表
+                let localBackgrounds = await LStorage.getSystemStorage('system.localDesktopBackgrounds');
+                if (!Array.isArray(localBackgrounds)) {
+                    localBackgrounds = [];
+                }
+                
+                // 检查是否已存在相同的背景
+                const existingIndex = localBackgrounds.findIndex(bg => bg && bg.id === backgroundId);
+                const localBgInfo = {
+                    id: backgroundId,
+                    name: fileName,
+                    description: description,
+                    path: imagePath
+                };
+                
+                if (existingIndex >= 0) {
+                    // 更新现有背景信息
+                    localBackgrounds[existingIndex] = localBgInfo;
+                } else {
+                    // 添加新背景信息
+                    localBackgrounds.push(localBgInfo);
+                }
+                
+                // 保存到存储
+                const saveResult = await LStorage.setSystemStorage('system.localDesktopBackgrounds', localBackgrounds);
+                if (saveResult) {
+                    KernelLogger.info("ThemeManager", `本地桌面背景信息已保存: ${backgroundId}`);
+                } else {
+                    KernelLogger.debug("ThemeManager", `本地桌面背景信息已更新，保存将在 D: 分区可用后自动完成: ${backgroundId}`);
+                }
+            } catch (e) {
+                KernelLogger.warn("ThemeManager", `保存本地桌面背景信息失败: ${e.message}`);
+            }
+        }
+        
+        // 设置背景
+        return await ThemeManager.setDesktopBackground(backgroundId, save);
     }
     
     /**

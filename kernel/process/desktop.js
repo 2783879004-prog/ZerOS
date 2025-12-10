@@ -124,9 +124,13 @@ class DesktopManager {
         // 创建图标容器
         const iconsContainer = document.createElement('div');
         iconsContainer.className = 'desktop-icons-container';
+        iconsContainer.style.display = 'block';
+        iconsContainer.style.visibility = 'visible';
         
         DesktopManager._iconsContainer = iconsContainer;
         DesktopManager._desktopContainer.appendChild(iconsContainer);
+        
+        KernelLogger.debug("DesktopManager", "图标容器已创建并添加到桌面");
         
         // 根据任务栏位置调整容器布局
         DesktopManager._updateIconsContainerLayout();
@@ -194,9 +198,11 @@ class DesktopManager {
         DesktopManager._iconsContainer.style.height = `${height}px`;
         DesktopManager._iconsContainer.style.padding = '20px';
         DesktopManager._iconsContainer.style.boxSizing = 'border-box';
-        DesktopManager._iconsContainer.style.overflow = 'hidden';
+        DesktopManager._iconsContainer.style.overflow = 'visible';
         DesktopManager._iconsContainer.style.pointerEvents = 'none';
-        DesktopManager._iconsContainer.style.zIndex = '1';
+        DesktopManager._iconsContainer.style.zIndex = '10';
+        DesktopManager._iconsContainer.style.display = 'block';
+        DesktopManager._iconsContainer.style.visibility = 'visible';
         
         // 重新应用排列模式（确保排列样式正确）
         DesktopManager._applyArrangementMode();
@@ -554,6 +560,17 @@ class DesktopManager {
             return;
         }
         
+        // 确保 LStorage 已初始化
+        if (!LStorage._initialized) {
+            KernelLogger.info("DesktopManager", "等待 LStorage 初始化...");
+            try {
+                await LStorage.init();
+            } catch (e) {
+                KernelLogger.error("DesktopManager", `LStorage 初始化失败: ${e.message}`, e);
+                return;
+            }
+        }
+        
         // 确保图标容器已创建
         if (!DesktopManager._iconsContainer) {
             KernelLogger.warn("DesktopManager", "图标容器未创建，尝试创建");
@@ -565,7 +582,10 @@ class DesktopManager {
         }
         
         try {
+            KernelLogger.info("DesktopManager", `从 PHP 存储加载桌面图标: Key=${DesktopManager.STORAGE_KEY_ICONS}`);
             const savedIcons = await LStorage.getSystemStorage(DesktopManager.STORAGE_KEY_ICONS);
+            
+            KernelLogger.debug("DesktopManager", `加载的图标数据: ${savedIcons ? (Array.isArray(savedIcons) ? `数组，长度=${savedIcons.length}` : `类型=${typeof savedIcons}`) : 'null'}`);
             
             if (savedIcons && Array.isArray(savedIcons) && savedIcons.length > 0) {
                 let loadedCount = 0;
@@ -608,15 +628,22 @@ class DesktopManager {
                         KernelLogger.warn("DesktopManager", `图标数量不匹配！DOM: ${domIcons.length}, 内存: ${DesktopManager._icons.size}`);
                     }
                 }
-            } else if (savedIcons !== null && savedIcons !== undefined && !Array.isArray(savedIcons)) {
-                KernelLogger.warn("DesktopManager", `保存的图标数据格式错误: 期望数组，实际为 ${typeof savedIcons}`);
+            } else if (savedIcons === null || savedIcons === undefined) {
+                KernelLogger.info("DesktopManager", "没有保存的桌面图标数据（首次运行或数据未保存）");
+            } else if (!Array.isArray(savedIcons)) {
+                KernelLogger.warn("DesktopManager", `保存的图标数据格式错误: 期望数组，实际为 ${typeof savedIcons}, 值: ${JSON.stringify(savedIcons).substring(0, 200)}`);
+            } else if (savedIcons.length === 0) {
+                KernelLogger.info("DesktopManager", "桌面图标数组为空");
             }
         } catch (e) {
             KernelLogger.error("DesktopManager", `加载桌面图标失败: ${e.message}`, e);
+            KernelLogger.error("DesktopManager", `错误堆栈: ${e.stack || '无堆栈信息'}`);
         }
         
         // 排列图标
         DesktopManager._arrangeIcons();
+        
+        KernelLogger.info("DesktopManager", `桌面图标加载完成，当前图标数量: ${DesktopManager._icons.size}`);
     }
     
     
@@ -633,8 +660,11 @@ class DesktopManager {
         // 检查是否已存在相同ID的图标元素
         const existingElement = document.getElementById(`desktop-icon-${iconData.id}`);
         if (existingElement) {
+            KernelLogger.debug("DesktopManager", `图标元素已存在: ${iconData.name} (ID: ${iconData.id})`);
             return existingElement;
         }
+        
+        KernelLogger.debug("DesktopManager", `创建图标元素: ${iconData.name} (ID: ${iconData.id}, icon: ${iconData.icon || '无图标'})`);
         
         const iconId = iconData.id;
         const iconElement = document.createElement('div');
@@ -683,7 +713,11 @@ class DesktopManager {
         // 加载图标
         if (iconData.icon) {
             const img = document.createElement('img');
-            img.src = iconData.icon;
+            // 转换虚拟路径为实际 URL
+            const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(iconData.icon)
+                : iconData.icon;
+            img.src = iconUrl;
             img.alt = iconData.name;
             img.style.cssText = `
                 width: 100%;
@@ -751,6 +785,7 @@ class DesktopManager {
         
         // 添加到容器
         DesktopManager._iconsContainer.appendChild(iconElement);
+        KernelLogger.debug("DesktopManager", `图标元素已添加到容器: ${iconData.name} (ID: ${iconData.id})`);
         
         // 在自由排列模式下，确保图标是绝对定位
         if (DesktopManager._arrangementMode === 'auto') {
@@ -763,18 +798,32 @@ class DesktopManager {
             iconElement.style.top = `${iconData.position.y}px`;
         }
         
-        // 添加进入动画
+        // 添加进入动画（确保图标最终可见）
         iconElement.style.opacity = '0';
         iconElement.style.transform = 'scale(0.8) translateY(-10px)';
+        iconElement.style.visibility = 'visible';
+        iconElement.style.display = 'flex';
+        
+        // 使用双重 requestAnimationFrame 确保动画执行
         requestAnimationFrame(() => {
-            iconElement.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
-            iconElement.style.opacity = '1';
-            iconElement.style.transform = 'scale(1) translateY(0)';
+            requestAnimationFrame(() => {
+                iconElement.style.transition = 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
+                iconElement.style.opacity = '1';
+                iconElement.style.transform = 'scale(1) translateY(0)';
+            });
         });
         
-        // 返回创建的元素
-        return iconElement;
+        // 备用方案：如果动画未执行，确保图标在500ms后可见
+        setTimeout(() => {
+            if (iconElement.style.opacity === '0' || iconElement.style.opacity === '') {
+                KernelLogger.warn("DesktopManager", `图标动画未执行，强制显示: ${iconData.name}`);
+                iconElement.style.opacity = '1';
+                iconElement.style.transform = 'scale(1) translateY(0)';
+                iconElement.style.transition = 'none';
+            }
+        }, 500);
         
+        // 返回创建的元素
         return iconElement;
     }
     
@@ -985,7 +1034,9 @@ class DesktopManager {
                     y: rect.top - containerRect.top
                 };
                 
-                DesktopManager._saveDesktopIcons();
+                DesktopManager._saveDesktopIcons().catch((e) => {
+                    KernelLogger.error("DesktopManager", `拖拽后保存桌面图标失败: ${e.message}`, e);
+                });
                 
                 // 延迟清除拖拽标志，确保点击事件被阻止
                 setTimeout(() => {
@@ -1191,7 +1242,9 @@ class DesktopManager {
         if (newName && newName.trim() && newName !== oldName) {
             iconData.name = newName.trim();
             label.textContent = iconData.name;
-            DesktopManager._saveDesktopIcons();
+            DesktopManager._saveDesktopIcons().catch((e) => {
+                KernelLogger.error("DesktopManager", `重命名后保存桌面图标失败: ${e.message}`, e);
+            });
             KernelLogger.info("DesktopManager", `图标重命名: ${oldName} -> ${iconData.name}`);
         }
     }
@@ -1352,29 +1405,74 @@ class DesktopManager {
         }
         
         // 检查 D: 分区是否可用
-        if (typeof Disk !== 'undefined' && Disk.diskSeparateMap) {
-            const dPartition = Disk.diskSeparateMap.get("D:");
-            if (!dPartition) {
-                // 延迟保存，等待 D: 分区初始化
-                DesktopManager._scheduleDelayedSave();
-                return;
+        // 注意：我们检查 diskSeparateSize 而不是 diskSeparateMap，
+        // 因为 diskSeparateSize 存储的是分区大小信息（持久化），
+        // 而 diskSeparateMap 中的 NodeTreeCollection 对象可能尚未从 POOL 加载
+        if (typeof Disk !== 'undefined') {
+            // 检查 diskSeparateSize 中是否有 D: 分区
+            const diskSeparateSize = Disk.diskSeparateSize;
+            if (diskSeparateSize && diskSeparateSize instanceof Map) {
+                const dPartitionSize = diskSeparateSize.get("D:");
+                if (!dPartitionSize || dPartitionSize <= 0) {
+                    // D: 分区未初始化或大小为0，延迟保存
+                    KernelLogger.debug("DesktopManager", "D: 分区尚未初始化（diskSeparateSize 中没有 D: 或大小为0），延迟保存");
+                    DesktopManager._scheduleDelayedSave();
+                    return;
+                }
+                // D: 分区已初始化，继续保存
+                KernelLogger.debug("DesktopManager", `D: 分区已初始化，大小: ${dPartitionSize} 字节`);
+            } else {
+                // diskSeparateSize 不可用，但我们可以尝试直接使用 LStorage（不依赖 Disk）
+                KernelLogger.debug("DesktopManager", "diskSeparateSize 不可用，但将尝试直接使用 LStorage（不依赖 Disk）");
             }
         }
         
         try {
             const iconsArray = Array.from(DesktopManager._icons.values());
             
+            KernelLogger.info("DesktopManager", `保存桌面图标到 PHP 存储: Key=${DesktopManager.STORAGE_KEY_ICONS}, 图标数量=${iconsArray.length}`);
+            
+            // 确保 LStorage 已初始化
+            if (!LStorage._initialized) {
+                KernelLogger.info("DesktopManager", "等待 LStorage 初始化...");
+                await LStorage.init();
+            }
+            
+            KernelLogger.debug("DesktopManager", `准备保存 ${iconsArray.length} 个图标到 PHP 存储`);
             const success = await LStorage.setSystemStorage(DesktopManager.STORAGE_KEY_ICONS, iconsArray);
             if (success) {
                 // 保存成功，重置重试计数
                 DesktopManager._delayedSaveRetryCount = 0;
+                KernelLogger.info("DesktopManager", `桌面图标保存成功: ${iconsArray.length} 个图标已保存到 PHP 存储`);
+                
+                // 验证保存是否真的成功（从内存中读取验证）
+                try {
+                    const savedIcons = await LStorage.getSystemStorage(DesktopManager.STORAGE_KEY_ICONS);
+                    if (savedIcons && Array.isArray(savedIcons) && savedIcons.length === iconsArray.length) {
+                        KernelLogger.debug("DesktopManager", `保存验证成功: ${savedIcons.length} 个图标已确认保存`);
+                    } else {
+                        KernelLogger.warn("DesktopManager", `保存验证失败: 期望 ${iconsArray.length} 个图标，实际 ${savedIcons ? (Array.isArray(savedIcons) ? savedIcons.length : '非数组') : 'null'}`);
+                        // 验证失败，抛出错误
+                        throw new Error(`保存验证失败: 期望 ${iconsArray.length} 个图标，实际 ${savedIcons ? (Array.isArray(savedIcons) ? savedIcons.length : '非数组') : 'null'}`);
+                    }
+                } catch (verifyError) {
+                    KernelLogger.warn("DesktopManager", `保存验证失败: ${verifyError.message}`);
+                    // 验证失败，抛出错误
+                    throw verifyError;
+                }
             } else {
-                KernelLogger.warn("DesktopManager", "保存桌面图标失败（LStorage返回false），将稍后重试");
+                const errorMsg = "保存桌面图标失败（LStorage返回false）";
+                KernelLogger.error("DesktopManager", errorMsg);
                 DesktopManager._scheduleDelayedSave();
+                // 抛出错误，让调用者知道保存失败
+                throw new Error(errorMsg);
             }
         } catch (e) {
             KernelLogger.error("DesktopManager", `保存桌面图标失败: ${e.message}，将稍后重试`, e);
+            KernelLogger.error("DesktopManager", `错误堆栈: ${e.stack || '无堆栈信息'}`);
             DesktopManager._scheduleDelayedSave();
+            // 重新抛出错误，让调用者知道保存失败
+            throw e;
         }
     }
     
@@ -1469,11 +1567,15 @@ class DesktopManager {
         }
         
         // 检查 D: 分区是否可用
-        if (typeof Disk !== 'undefined' && Disk.diskSeparateMap) {
-            const dPartition = Disk.diskSeparateMap.get("D:");
-            if (!dPartition) {
-                KernelLogger.debug("DesktopManager", `D: 分区尚未初始化，跳过保存配置: ${key}`);
-                return;
+        // 注意：我们检查 diskSeparateSize 而不是 diskSeparateMap
+        if (typeof Disk !== 'undefined') {
+            const diskSeparateSize = Disk.diskSeparateSize;
+            if (diskSeparateSize && diskSeparateSize instanceof Map) {
+                const dPartitionSize = diskSeparateSize.get("D:");
+                if (!dPartitionSize || dPartitionSize <= 0) {
+                    KernelLogger.debug("DesktopManager", `D: 分区尚未初始化，跳过保存配置: ${key}`);
+                    return;
+                }
             }
         }
         
@@ -1532,16 +1634,33 @@ class DesktopManager {
         };
         
         DesktopManager._icons.set(iconId, iconData);
-        DesktopManager._createIconElement(iconData);
+        
+        // 创建图标元素
+        const iconElement = DesktopManager._createIconElement(iconData);
+        if (!iconElement) {
+            KernelLogger.error("DesktopManager", `无法创建图标元素: ${iconData.name}`);
+            DesktopManager._icons.delete(iconId);
+            throw new Error(`无法创建图标元素: ${iconData.name}`);
+        }
+        
+        KernelLogger.info("DesktopManager", `桌面图标已创建: ${iconData.name} (ID: ${iconId}, icon: ${iconData.icon || '无图标'})`);
         
         // 重新排列
         DesktopManager._arrangeIcons();
         
-        // 保存（异步，不阻塞）
+        // 确保图标容器可见
+        if (DesktopManager._iconsContainer) {
+            DesktopManager._iconsContainer.style.display = 'block';
+            DesktopManager._iconsContainer.style.visibility = 'visible';
+        }
+        
+        // 保存（异步，不阻塞，但确保保存成功）
         DesktopManager._saveDesktopIcons().then(() => {
-            KernelLogger.info("DesktopManager", `添加桌面快捷方式: ${iconData.name} (已保存)`);
+            KernelLogger.info("DesktopManager", `添加桌面快捷方式: ${iconData.name} (已保存到 PHP 存储)`);
         }).catch((e) => {
-            KernelLogger.warn("DesktopManager", `添加桌面快捷方式: ${iconData.name} (保存失败: ${e.message})`);
+            KernelLogger.error("DesktopManager", `添加桌面快捷方式: ${iconData.name} (保存失败: ${e.message})`, e);
+            // 保存失败时，安排延迟重试
+            DesktopManager._scheduleDelayedSave();
         });
         
         return iconId;
@@ -1575,7 +1694,9 @@ class DesktopManager {
         DesktopManager._icons.delete(iconId);
         
         // 保存
-        DesktopManager._saveDesktopIcons();
+        DesktopManager._saveDesktopIcons().catch((e) => {
+            KernelLogger.error("DesktopManager", `移除后保存桌面图标失败: ${e.message}`, e);
+        });
         
         KernelLogger.info("DesktopManager", `移除桌面快捷方式: ${iconData.name}`);
     }

@@ -8,6 +8,7 @@
 
 - `MemoryManager` - 内存管理器（用于内存分配）
 - `ApplicationAssetManager` - 应用程序资源管理器（用于获取程序资源）
+- `PermissionManager` - 权限管理器（用于权限检查和验证）
 - `GUIManager` - GUI 管理器（用于窗口管理）
 - `NotificationManager` - 通知管理器（用于清理通知）
 - `ContextMenuManager` - 上下文菜单管理器（用于清理上下文菜单）
@@ -390,6 +391,84 @@ const allProcesses = ProcessManager.getProcessInfo();
 - `pid` (number|null): 进程 ID（可选）
 
 **返回值**: `Promise<Object>` - 网络连接信息对象
+
+### 内核 API 调用
+
+#### `callKernelAPI(pid, apiName, args)`
+
+调用内核 API。所有内核 API 调用都会自动进行权限检查。
+
+**参数**:
+- `pid` (number): 进程 ID
+- `apiName` (string): API 名称（如 `'FileSystem.read'`, `'Notification.create'`）
+- `args` (Array): 参数数组
+
+**返回值**: `Promise<any>` - API 调用结果
+
+**权限检查**:
+- 所有内核 API 调用都会自动检查程序是否有相应权限
+- 如果程序没有权限，API 调用会被拒绝并抛出错误
+- 权限检查是强制性的，不能绕过
+- Exploit 程序（PID 10000）享有直接通信权限，无需权限检查
+
+**可用 API**:
+- `FileSystem.read` - 读取文件（需要 `KERNEL_DISK_READ` 权限）
+- `FileSystem.write` - 写入文件（需要 `KERNEL_DISK_WRITE` 权限）
+- `FileSystem.delete` - 删除文件（需要 `KERNEL_DISK_DELETE` 权限）
+- `FileSystem.create` - 创建文件/目录（需要 `KERNEL_DISK_CREATE` 权限）
+- `FileSystem.list` - 列出目录（需要 `KERNEL_DISK_LIST` 权限）
+- `Notification.create` - 创建通知（需要 `SYSTEM_NOTIFICATION` 权限）
+- `Notification.remove` - 移除通知（需要 `SYSTEM_NOTIFICATION` 权限）
+- `Network.request` - 网络请求（需要 `NETWORK_ACCESS` 权限）
+- `Network.fetch` - 网络获取（需要 `NETWORK_ACCESS` 权限）
+- `GUI.createWindow` - 创建窗口（需要 `GUI_WINDOW_CREATE` 权限）
+- `GUI.manageWindow` - 管理窗口（需要 `GUI_WINDOW_MANAGE` 权限）
+- `Storage.read` - 读取系统存储（需要 `SYSTEM_STORAGE_READ` 权限）
+- `Storage.write` - 写入系统存储（需要 `SYSTEM_STORAGE_WRITE` 权限）
+- `Theme.read` - 读取主题（需要 `THEME_READ` 权限）
+- `Theme.write` - 修改主题（需要 `THEME_WRITE` 权限）
+- `Desktop.manage` - 管理桌面（需要 `DESKTOP_MANAGE` 权限）
+- `Process.manage` - 管理进程（需要 `PROCESS_MANAGE` 权限）
+
+**示例**:
+```javascript
+// 读取文件（自动权限检查）
+try {
+    const content = await ProcessManager.callKernelAPI(
+        this.pid,
+        'FileSystem.read',
+        ['D:/myfile.txt']
+    );
+    console.log('文件内容:', content);
+} catch (e) {
+    if (e.message.includes('没有权限')) {
+        console.error('权限被拒绝:', e.message);
+    } else {
+        console.error('读取文件失败:', e.message);
+    }
+}
+
+// 创建通知（自动权限检查）
+try {
+    await ProcessManager.callKernelAPI(
+        this.pid,
+        'Notification.create',
+        [{
+            type: 'snapshot',
+            title: '通知标题',
+            content: '通知内容'
+        }]
+    );
+} catch (e) {
+    console.error('创建通知失败:', e.message);
+}
+```
+
+**注意事项**:
+- 程序必须在 `__info__` 中声明所需权限
+- 普通权限会自动授予，特殊权限需要用户确认
+- 权限被拒绝时，API 调用会立即抛出错误
+- 详细权限列表请参考 [PermissionManager API 文档](./PermissionManager.md)
 
 ### 其他方法
 

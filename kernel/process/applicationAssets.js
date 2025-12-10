@@ -12,21 +12,21 @@
 //   - 支持图片（svg, png, jpg, gif, webp, ico）
 //   - 支持字体（woff, woff2, ttf, otf, eot）
 //   - 支持其他数据文件（JSON等）
-//   - 示例: assets: ["application/myapp/assets/icon.svg", "application/myapp/assets/font.woff2"]
+//   - 示例: assets: ["D:/application/myapp/assets/icon.svg", "D:/application/myapp/assets/font.woff2"]
 // - metadata: 程序元数据（可选）
 //   - supportsPreview: boolean (可选) - 是否支持窗口预览快照，如果为true，当程序只有单例运行时，会使用html2canvas生成真实的窗口快照
 
 const APPLICATION_ASSETS = {
     // 终端程序（ZerOS内置终端，永恒存在）
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "terminal": {
-        script: "application/terminal/terminal.js",
-        styles: ["application/terminal/terminal.css"],
-        icon: "application/terminal/terminal.svg",
+        script: "D:/application/terminal/terminal.js",
+        styles: ["D:/application/terminal/terminal.css"],
+        icon: "D:/application/terminal/terminal.svg",
         // assets: 程序资源文件（可选）
         // 支持字符串（单个资源）或数组（多个资源）
         // 资源可以是图片、字体、数据文件等
-        // assets: ["application/terminal/assets/icon1.svg", "application/terminal/assets/icon2.png"],
+        // assets: ["D:/application/terminal/assets/icon1.svg", "D:/application/terminal/assets/icon2.png"],
         metadata: {
             autoStart: false,  // 终端应该自动启动（作为系统内置终端）
             priority: 0,  // 最高优先级
@@ -40,13 +40,13 @@ const APPLICATION_ASSETS = {
     },
     
     // Vim编辑器
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "vim": {
-        script: "application/vim/vim.js",
-        styles: ["application/vim/vim.css"],
-        icon: "application/vim/vim.svg",
+        script: "D:/application/vim/vim.js",
+        styles: ["D:/application/vim/vim.css"],
+        icon: "D:/application/vim/vim.svg",
         // assets: 程序资源文件（可选）
-        // assets: ["application/vim/assets/icon.svg"],
+        // assets: ["D:/application/vim/assets/icon.svg"],
         metadata: {
             autoStart: false,
             priority: 1,
@@ -59,11 +59,11 @@ const APPLICATION_ASSETS = {
     },
     
     // 任务管理器
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "taskmanager": {
-        script: "application/taskmanager/taskmanager.js",
-        styles: ["application/taskmanager/taskmanager.css"],
-        icon: "application/taskmanager/taskmanager.svg",
+        script: "D:/application/taskmanager/taskmanager.js",
+        styles: ["D:/application/taskmanager/taskmanager.css"],
+        icon: "D:/application/taskmanager/taskmanager.svg",
         metadata: {
             autoStart: false,
             priority: 2,
@@ -78,23 +78,23 @@ const APPLICATION_ASSETS = {
     },
     
     // 文件管理器
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "filemanager": {
-        script: "application/filemanager/filemanager.js",
-        styles: ["application/filemanager/filemanager.css"],
-        icon: "application/filemanager/filemanager.svg",
+        script: "D:/application/filemanager/filemanager.js",
+        styles: ["D:/application/filemanager/filemanager.css"],
+        icon: "D:/application/filemanager/filemanager.svg",
         // 程序资源文件
         assets: [
-            "application/filemanager/assets/folder.svg",
-            "application/filemanager/assets/file.svg",
-            "application/filemanager/assets/file-text.svg",
-            "application/filemanager/assets/file-code.svg",
-            "application/filemanager/assets/file-image.svg",
-            "application/filemanager/assets/info.svg",
-            "application/filemanager/assets/edit.svg",
-            "application/filemanager/assets/trash.svg",
-            "application/filemanager/assets/copy.svg",
-            "application/filemanager/assets/move.svg"
+            "D:/application/filemanager/assets/folder.svg",
+            "D:/application/filemanager/assets/file.svg",
+            "D:/application/filemanager/assets/file-text.svg",
+            "D:/application/filemanager/assets/file-code.svg",
+            "D:/application/filemanager/assets/file-image.svg",
+            "D:/application/filemanager/assets/info.svg",
+            "D:/application/filemanager/assets/edit.svg",
+            "D:/application/filemanager/assets/trash.svg",
+            "D:/application/filemanager/assets/copy.svg",
+            "D:/application/filemanager/assets/move.svg"
         ],
         metadata: {
             autoStart: false,
@@ -110,11 +110,11 @@ const APPLICATION_ASSETS = {
     },
     
     // 贪吃蛇游戏
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "snake": {
-        script: "application/snake/snake.js",
-        styles: ["application/snake/snake.css"],
-        icon: "application/snake/snake.svg",
+        script: "D:/application/snake/snake.js",
+        styles: ["D:/application/snake/snake.css"],
+        icon: "D:/application/snake/snake.svg",
         metadata: {
             autoStart: false,
             priority: 4,
@@ -129,13 +129,13 @@ const APPLICATION_ASSETS = {
     },
     
     // 浏览器
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "browser": {
-        script: "application/browser/browser.js",
-        styles: ["application/browser/browser.css"],
-        icon: "application/browser/browser.svg",
+        script: "D:/application/browser/browser.js",
+        styles: ["D:/application/browser/browser.css"],
+        icon: "D:/application/browser/browser.svg",
         assets: [
-            "application/browser/assets/booklink.js"
+            "D:/application/browser/assets/booklink.js"
         ],
         metadata: {
             autoStart: false,
@@ -150,12 +150,31 @@ const APPLICATION_ASSETS = {
         }
     },
     
+    // WebViewer - 静态网页容器
+    // 注意：路径是 D: 盘下的真实路径
+    "webviewer": {
+        script: "D:/application/webviewer/webviewer.js",
+        styles: ["D:/application/webviewer/webviewer.css"],
+        icon: "D:/application/webviewer/webviewer.svg",
+        metadata: {
+            autoStart: false,
+            priority: 5,
+            description: "ZerOS WebViewer - 静态网页容器，用于运行用户编写的静态网页",
+            version: "1.0.0",
+            type: "GUI",
+            alwaysShowInTaskbar: false,
+            allowMultipleInstances: true,
+            supportsPreview: true,  // 支持窗口预览快照
+            category: "system"  // 系统应用
+        }
+    },
+    
     // 主题与动画管理器
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "themeanimator": {
-        script: "application/themeanimator/themeanimator.js",
-        styles: ["application/themeanimator/themeanimator.css"],
-        icon: "application/themeanimator/themeanimator.svg",
+        script: "D:/application/themeanimator/themeanimator.js",
+        styles: ["D:/application/themeanimator/themeanimator.css"],
+        icon: "D:/application/themeanimator/themeanimator.svg",
         metadata: {
             autoStart: false,
             priority: 6,
@@ -169,12 +188,69 @@ const APPLICATION_ASSETS = {
         }
     },
     
+    // 图片查看器
+    // 注意：路径是 D: 盘下的真实路径
+    "imageviewer": {
+        script: "D:/application/imageviewer/imageviewer.js",
+        styles: ["D:/application/imageviewer/imageviewer.css"],
+        icon: "D:/application/imageviewer/imageviewer.svg",
+        metadata: {
+            autoStart: false,
+            priority: 3,
+            description: "ZerOS 图片查看器 - 支持 jpg, png, svg, webp 等格式，提供缩放和拖拽功能",
+            version: "1.0.0",
+            type: "GUI",
+            alwaysShowInTaskbar: false,
+            allowMultipleInstances: true,
+            supportsPreview: true,  // 支持窗口预览快照
+            category: "system"  // 系统应用
+        }
+    },
+    
+    // 音频播放器
+    // 注意：路径是 D: 盘下的真实路径
+    "audioplayer": {
+        script: "D:/application/audioplayer/audioplayer.js",
+        styles: ["D:/application/audioplayer/audioplayer.css"],
+        icon: "D:/application/audioplayer/audioplayer.svg",
+        metadata: {
+            autoStart: false,
+            priority: 4,
+            description: "ZerOS 音频播放器 - 支持播放 mp3, wav, flac 等音频格式",
+            version: "1.0.0",
+            type: "GUI",
+            alwaysShowInTaskbar: false,
+            allowMultipleInstances: true,
+            supportsPreview: true,  // 支持窗口预览快照
+            category: "system"  // 系统应用
+        }
+    },
+    
+    // 视频播放器
+    // 注意：路径是 D: 盘下的真实路径
+    "videoplayer": {
+        script: "D:/application/videoplayer/videoplayer.js",
+        styles: ["D:/application/videoplayer/videoplayer.css"],
+        icon: "D:/application/videoplayer/videoplayer.svg",
+        metadata: {
+            autoStart: false,
+            priority: 5,
+            description: "ZerOS 视频播放器 - 支持播放 mp4, webm, avi 等视频格式",
+            version: "1.0.0",
+            type: "GUI",
+            alwaysShowInTaskbar: false,
+            allowMultipleInstances: true,
+            supportsPreview: true,  // 支持窗口预览快照
+            category: "system"  // 系统应用
+        }
+    },
+    
     // ZerOS 系统信息
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "about": {
-        script: "application/about/about.js",
-        styles: ["application/about/about.css"],
-        icon: "application/about/about.svg",
+        script: "D:/application/about/about.js",
+        styles: ["D:/application/about/about.css"],
+        icon: "D:/application/about/about.svg",
         metadata: {
             autoStart: false,
             priority: 7,
@@ -190,15 +266,34 @@ const APPLICATION_ASSETS = {
     },
     
     // 音乐播放器
-    // 注意：路径是相对于 test/index.html 的路径
+    // 注意：路径是 D: 盘下的真实路径
     "musicplayer": {
-        script: "application/musicplayer/musicplayer.js",
-        styles: ["application/musicplayer/musicplayer.css"],
-        icon: "application/musicplayer/musicplayer.svg",
+        script: "D:/application/musicplayer/musicplayer.js",
+        styles: ["D:/application/musicplayer/musicplayer.css"],
+        icon: "D:/application/musicplayer/musicplayer.svg",
         metadata: {
             autoStart: false,
             priority: 8,
             description: "音乐播放器 - 高仿网易云音乐风格的在线音乐播放器",
+            version: "1.0.0",
+            type: "GUI",
+            alwaysShowInTaskbar: false,
+            allowMultipleInstances: true,
+            supportsPreview: true,  // 支持窗口预览快照
+            category: "other"  // 其他应用
+        }
+    },
+    
+    // 愤怒的小鸟游戏
+    // 注意：路径是 D: 盘下的真实路径
+    "angrybirds": {
+        script: "D:/application/angrybirds/angrybirds.js",
+        styles: ["D:/application/angrybirds/angrybirds.css"],
+        icon: "D:/application/angrybirds/angrybirds.svg",
+        metadata: {
+            autoStart: false,
+            priority: 9,
+            description: "愤怒的小鸟 - 使用PixiJS实现的经典弹弓射击游戏，1:1还原玩法，支持多关卡",
             version: "1.0.0",
             type: "GUI",
             alwaysShowInTaskbar: false,

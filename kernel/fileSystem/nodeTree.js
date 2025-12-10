@@ -384,7 +384,9 @@ class NodeTreeCollection {
                     entry.loaded = true;
                     KernelLogger.debug("NodeTree", `fileType 已加载，直接初始化 ${separateName}`);
                     this.initialized = true;
-                    this._loadFromLocalStorage();
+                    this._loadFromLocalStorage().catch(e => {
+                        KernelLogger.warn("NodeTree", `加载文件系统数据失败: ${e.message}`);
+                    });
                 } else {
                     // 如果未加载，等待加载
                     Dependency.waitLoaded("../kernel/typePool/fileType.js", {
@@ -394,14 +396,18 @@ class NodeTreeCollection {
                     .then(() => {
                         this.initialized = true;
                         KernelLogger.info("NodeTree", `collection deps loaded ${separateName}`);
-                        // 从 localStorage 加载数据
-                        this._loadFromLocalStorage();
+                        // 从 PHP 文件系统加载数据
+                        this._loadFromLocalStorage().catch(e => {
+                            KernelLogger.warn("NodeTree", `加载文件系统数据失败: ${e.message}`);
+                        });
                     })
                     .catch((e) => {
                         KernelLogger.warn("NodeTree", `等待 fileType 超时，直接初始化 ${separateName}`, String(e));
                         // 即使失败也标记为已初始化，避免阻塞
                         this.initialized = true;
-                        this._loadFromLocalStorage();
+                        this._loadFromLocalStorage().catch(e => {
+                            KernelLogger.warn("NodeTree", `加载文件系统数据失败: ${e.message}`);
+                        });
                     });
                 }
             } else {
@@ -430,51 +436,416 @@ class NodeTreeCollection {
                     KernelLogger.debug("NodeTree", `Dependency 不可用，直接初始化 ${separateName}`);
                 }
                 this.initialized = true;
-                this._loadFromLocalStorage();
+                this._loadFromLocalStorage().catch(e => {
+                    KernelLogger.warn("NodeTree", `加载文件系统数据失败: ${e.message}`);
+                });
             }
         } catch (e) {
             KernelLogger.error("NodeTree", `等待依赖失败 ${separateName}`, String(e));
             this.initialized = true;
-            this._loadFromLocalStorage();
+            this._loadFromLocalStorage().catch(e => {
+                KernelLogger.warn("NodeTree", `加载文件系统数据失败: ${e.message}`);
+            });
         }
     }
     
-    // 保存到 localStorage
-    _saveToLocalStorage() {
-        if (typeof window === 'undefined' || !window.localStorage) {
-            KernelLogger.warn("NodeTree", "localStorage not available");
-            return;
-        }
-        
+    // 保存到 PHP 文件系统（通过 FSDirve.php）
+    async _saveToLocalStorage() {
         try {
-            const storageKey = `filesystem_${this.separateName}`;
+            // 将 separateName 中的冒号替换为下划线，避免文件名中的冒号问题
+            const safeName = this.separateName.replace(':', '_');
+            const fileName = `filesystem_${safeName}.json`;
+            // 根据 separateName 决定存储路径（C: 或 D:）
+            const filePath = `${this.separateName}/`;
             const serialized = this._serialize();
-            window.localStorage.setItem(storageKey, serialized);
-            KernelLogger.info("NodeTree", `saved to localStorage: ${storageKey}`);
-        } catch (e) {
-            KernelLogger.error("NodeTree", `failed to save to localStorage: ${String(e)}`);
-        }
-    }
-    
-    // 从 localStorage 加载
-    _loadFromLocalStorage() {
-        if (typeof window === 'undefined' || !window.localStorage) {
-            KernelLogger.warn("NodeTree", "localStorage not available");
-            return;
-        }
-        
-        try {
-            const storageKey = `filesystem_${this.separateName}`;
-            const serialized = window.localStorage.getItem(storageKey);
             
-            if (serialized) {
-                KernelLogger.info("NodeTree", `loading from localStorage: ${storageKey}`);
-                this._deserialize(serialized);
+            // 使用 PHP 服务保存文件
+            const phpServiceUrl = "/service/FSDirve.php";
+            const url = new URL(phpServiceUrl, window.location.origin);
+            url.searchParams.set('action', 'write_file');
+            url.searchParams.set('path', filePath);
+            url.searchParams.set('fileName', fileName);
+            url.searchParams.set('writeMod', 'overwrite');
+            
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ content: serialized })
+            });
+            
+            if (!response.ok) {
+                // 尝试读取错误响应内容
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            // 检查响应类型
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                KernelLogger.info("NodeTree", `saved to PHP file system: ${filePath}/${fileName}`);
             } else {
-                KernelLogger.info("NodeTree", `no saved data in localStorage: ${storageKey}`);
+                throw new Error(result.message || '保存文件失败');
             }
         } catch (e) {
-            KernelLogger.error("NodeTree", `failed to load from localStorage: ${String(e)}`);
+            KernelLogger.error("NodeTree", `failed to save to PHP file system: ${String(e)}`);
+        }
+    }
+    
+    // 从 PHP 文件系统加载（通过 FSDirve.php）
+    async _loadFromLocalStorage() {
+        try {
+            // 将 separateName 中的冒号替换为下划线，避免文件名中的冒号问题
+            const safeName = this.separateName.replace(':', '_');
+            const fileName = `filesystem_${safeName}.json`;
+            // 根据 separateName 决定存储路径（C: 或 D:）
+            const filePath = `${this.separateName}/`;
+            
+            // 先检查文件是否存在，避免 404 错误
+            const phpServiceUrl = "/service/FSDirve.php";
+            const checkUrl = new URL(phpServiceUrl, window.location.origin);
+            checkUrl.searchParams.set('action', 'exists');
+            checkUrl.searchParams.set('path', `${filePath}${fileName}`);
+            
+            const checkResponse = await fetch(checkUrl.toString(), {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            // 如果检查请求失败，直接返回（不记录错误）
+            if (!checkResponse.ok) {
+                return;
+            }
+            
+            const checkContentType = checkResponse.headers.get('content-type');
+            if (!checkContentType || !checkContentType.includes('application/json')) {
+                return;
+            }
+            
+            const checkResult = await checkResponse.json();
+            
+            // 如果文件不存在，直接返回（不发送 read_file 请求，避免 404）
+            if (checkResult.status !== 'success' || !checkResult.data || !checkResult.data.exists || checkResult.data.type !== 'file') {
+                KernelLogger.debug("NodeTree", `文件不存在，跳过加载: ${this.separateName}`);
+                return;
+            }
+            
+            // 文件存在，读取文件内容
+            const readUrl = new URL(phpServiceUrl, window.location.origin);
+            readUrl.searchParams.set('action', 'read_file');
+            readUrl.searchParams.set('path', filePath);
+            readUrl.searchParams.set('fileName', fileName);
+            
+            const response = await fetch(readUrl.toString(), {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                // 如果读取失败，记录警告但不抛出错误
+                KernelLogger.warn("NodeTree", `读取文件失败: ${filePath}/${fileName}`);
+                return;
+            }
+            
+            // 检查响应类型
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                KernelLogger.warn("NodeTree", `PHP 返回了非 JSON 响应`);
+                return;
+            }
+            
+            const result = await response.json();
+            
+            if (result.status === 'success' && result.data && result.data.content) {
+                KernelLogger.info("NodeTree", `loading from PHP file system: ${filePath}/${fileName}`);
+                this._deserialize(result.data.content);
+            } else if (result.status === 'error' && result.message && result.message.includes('不存在')) {
+                KernelLogger.debug("NodeTree", `no saved data in PHP file system: ${filePath}/${fileName}`);
+            }
+        } catch (e) {
+            // 静默处理所有错误（文件不存在是正常的）
+            KernelLogger.debug("NodeTree", `加载文件系统数据失败（已忽略）: ${this.separateName}`);
+        }
+    }
+    
+    // 通过 PHP 服务创建真实目录
+    async _createRealDirectoryInPHP(virtualPath, dirName) {
+        try {
+            const phpServiceUrl = "/service/FSDirve.php";
+            const url = new URL(phpServiceUrl, window.location.origin);
+            url.searchParams.set('action', 'create_dir');
+            url.searchParams.set('path', virtualPath);
+            url.searchParams.set('name', dirName);
+            
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                // 409 表示目录已存在，这是正常的
+                if (response.status === 409) {
+                    KernelLogger.debug("NodeTree", `目录已存在: ${virtualPath}/${dirName}`);
+                    return true;
+                }
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                KernelLogger.debug("NodeTree", `PHP 目录创建成功: ${virtualPath}/${dirName}`);
+                return true;
+            } else if (result.status === 'error' && result.message && result.message.includes('已存在')) {
+                KernelLogger.debug("NodeTree", `目录已存在: ${virtualPath}/${dirName}`);
+                return true;
+            } else {
+                throw new Error(result.message || '创建目录失败');
+            }
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 创建目录失败: ${virtualPath}/${dirName}, ${String(e)}`);
+            // 不抛出错误，允许继续执行（降级处理）
+            return false;
+        }
+    }
+    
+    // 通过 PHP 服务创建真实文件
+    async _createRealFileInPHP(virtualPath, fileName, content = '') {
+        try {
+            const phpServiceUrl = "/service/FSDirve.php";
+            const url = new URL(phpServiceUrl, window.location.origin);
+            url.searchParams.set('action', 'create_file');
+            url.searchParams.set('path', virtualPath);
+            url.searchParams.set('fileName', fileName);
+            
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ content: content })
+            });
+            
+            if (!response.ok) {
+                // 409 表示文件已存在，这是正常的
+                if (response.status === 409) {
+                    KernelLogger.debug("NodeTree", `文件已存在: ${virtualPath}/${fileName}`);
+                    return true;
+                }
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                KernelLogger.debug("NodeTree", `PHP 文件创建成功: ${virtualPath}/${fileName}`);
+                return true;
+            } else if (result.status === 'error' && result.message && result.message.includes('已存在')) {
+                KernelLogger.debug("NodeTree", `文件已存在: ${virtualPath}/${fileName}`);
+                return true;
+            } else {
+                throw new Error(result.message || '创建文件失败');
+            }
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 创建文件失败: ${virtualPath}/${fileName}, ${String(e)}`);
+            // 不抛出错误，允许继续执行（降级处理）
+            return false;
+        }
+    }
+    
+    // 通过 PHP 服务写入真实文件
+    async _writeRealFileInPHP(virtualPath, fileName, content, writeMod = 'overwrite') {
+        try {
+            const phpServiceUrl = "/service/FSDirve.php";
+            const url = new URL(phpServiceUrl, window.location.origin);
+            url.searchParams.set('action', 'write_file');
+            url.searchParams.set('path', virtualPath);
+            url.searchParams.set('fileName', fileName);
+            url.searchParams.set('writeMod', writeMod);
+            
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ content: content })
+            });
+            
+            if (!response.ok) {
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                KernelLogger.debug("NodeTree", `PHP 文件写入成功: ${virtualPath}/${fileName}`);
+                return true;
+            } else {
+                throw new Error(result.message || '写入文件失败');
+            }
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 写入文件失败: ${virtualPath}/${fileName}, ${String(e)}`);
+            // 不抛出错误，允许继续执行（降级处理）
+            return false;
+        }
+    }
+    
+    // 通过 PHP 服务删除真实文件
+    async _deleteRealFileInPHP(virtualPath, fileName) {
+        try {
+            const phpServiceUrl = "/service/FSDirve.php";
+            const url = new URL(phpServiceUrl, window.location.origin);
+            url.searchParams.set('action', 'delete_file');
+            url.searchParams.set('path', virtualPath);
+            url.searchParams.set('fileName', fileName);
+            
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                // 404 表示文件不存在，这是正常的
+                if (response.status === 404) {
+                    KernelLogger.debug("NodeTree", `文件不存在: ${virtualPath}/${fileName}`);
+                    return true;
+                }
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                KernelLogger.debug("NodeTree", `PHP 文件删除成功: ${virtualPath}/${fileName}`);
+                return true;
+            } else if (result.status === 'error' && result.message && result.message.includes('不存在')) {
+                KernelLogger.debug("NodeTree", `文件不存在: ${virtualPath}/${fileName}`);
+                return true;
+            } else {
+                throw new Error(result.message || '删除文件失败');
+            }
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 删除文件失败: ${virtualPath}/${fileName}, ${String(e)}`);
+            // 不抛出错误，允许继续执行（降级处理）
+            return false;
+        }
+    }
+    
+    // 通过 PHP 服务删除真实目录
+    async _deleteRealDirectoryInPHP(virtualPath) {
+        try {
+            const phpServiceUrl = "/service/FSDirve.php";
+            const url = new URL(phpServiceUrl, window.location.origin);
+            url.searchParams.set('action', 'delete_dir');
+            url.searchParams.set('path', virtualPath);
+            
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                // 404 表示目录不存在，这是正常的
+                if (response.status === 404) {
+                    KernelLogger.debug("NodeTree", `目录不存在: ${virtualPath}`);
+                    return true;
+                }
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            if (result.status === 'success') {
+                KernelLogger.debug("NodeTree", `PHP 目录删除成功: ${virtualPath}`);
+                return true;
+            } else if (result.status === 'error' && result.message && result.message.includes('不存在')) {
+                KernelLogger.debug("NodeTree", `目录不存在: ${virtualPath}`);
+                return true;
+            } else {
+                throw new Error(result.message || '删除目录失败');
+            }
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 删除目录失败: ${virtualPath}, ${String(e)}`);
+            // 不抛出错误，允许继续执行（降级处理）
+            return false;
         }
     }
     
@@ -708,8 +1079,8 @@ class NodeTreeCollection {
     }
 
     // 节点操作(封装)
-    // 创建目录
-    create_dir(path, name) {
+    // 创建目录（异步，等待 PHP 操作完成）
+    async create_dir(path, name) {
         if (!this.initialized) {
             KernelLogger.warn("NodeTree", "not initialized create_dir");
             return;
@@ -721,8 +1092,19 @@ class NodeTreeCollection {
         });
         this.optNode(FileType.DIR_OPS.CREATE, path, node);
         KernelLogger.info("NodeTree", `created dir ${path}/${name}`);
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        
+        // 通过 PHP 创建真实目录（等待完成）
+        try {
+            await this._createRealDirectoryInPHP(path, name);
+            KernelLogger.debug("NodeTree", `PHP 目录创建成功: ${path}/${name}`);
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 创建目录失败: ${path}/${name}, ${e.message}`);
+        }
+        
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
     }
     // 删除目录
     delete_dir(path) {
@@ -761,8 +1143,16 @@ class NodeTreeCollection {
         });
         this.optNode(FileType.DIR_OPS.DELETE, parentPath, node);
         KernelLogger.info("NodeTree", `deleted dir ${path}`);
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        
+        // 通过 PHP 删除真实目录（异步，不阻塞）
+        this._deleteRealDirectoryInPHP(path).catch(e => {
+            KernelLogger.warn("NodeTree", `通过 PHP 删除目录失败: ${path}, ${e.message}`);
+        });
+        
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
     }
 
     // 文件操作(封装)
@@ -779,23 +1169,54 @@ class NodeTreeCollection {
             target.attributes[fileName]
         );
     }
-    // 写入文件
+    // 写入文件（异步，等待 PHP 操作完成）
     // 支持可选的 writeMod 参数，会传递给底层文件对象的 writeFile 方法
-    write_file(path, fileName, newContent, writeMod) {
+    async write_file(path, fileName, newContent, writeMod) {
         if (!this.initialized) {
             KernelLogger.warn("NodeTree", "not initialized write_file");
             return;
         }
         KernelLogger.info("NodeTree", `write file ${fileName} at ${path} writeMod=${String(writeMod)}`);
         const target = this.nodes.get(path);
+        const fileObj = target.attributes[fileName];
+        
         // 将写模式透传到 Node.optFile -> FileFormwork.writeFile
         target.optFile(
             FileType.FILE_OPS.WRITE,
-            target.attributes[fileName],
+            fileObj,
             newContent,
             writeMod
         );
         KernelLogger.info("NodeTree", `wrote file ${fileName} at ${path}`);
+        
+        // 获取文件内容（用于 PHP 写入）
+        let fileContent = '';
+        if (fileObj && fileObj.fileContent) {
+            if (Array.isArray(fileObj.fileContent)) {
+                fileContent = fileObj.fileContent.join('\n');
+            } else {
+                fileContent = String(fileObj.fileContent);
+            }
+        } else if (newContent !== undefined) {
+            fileContent = typeof newContent === 'string' ? newContent : String(newContent);
+        }
+        
+        // 通过 PHP 写入真实文件（等待完成）
+        try {
+            // 将 writeMod 转换为字符串格式（'overwrite' 或 'append'）
+            let writeModStr = 'overwrite';
+            const FileTypeRef = getFileType();
+            if (FileTypeRef && FileTypeRef.WRITE_MODES) {
+                if (writeMod === FileTypeRef.WRITE_MODES.APPEND) {
+                    writeModStr = 'append';
+                }
+            }
+            await this._writeRealFileInPHP(path, fileName, fileContent, writeModStr);
+            KernelLogger.debug("NodeTree", `PHP 文件写入成功: ${path}/${fileName}`);
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 写入文件失败: ${path}/${fileName}, ${e.message}`);
+        }
+        
         // 写入后更新磁盘使用统计（如果 Disk 可用）
         try {
             if (
@@ -804,11 +1225,13 @@ class NodeTreeCollection {
             )
                 Disk.update();
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
     }
-    // 创建文件
-    create_file(path, file) {
+    // 创建文件（异步，等待 PHP 操作完成）
+    async create_file(path, file) {
         if (!this.initialized) {
             KernelLogger.warn("NodeTree", "not initialized create_file");
             return;
@@ -864,6 +1287,25 @@ class NodeTreeCollection {
         KernelLogger.info("NodeTree", `create file ${fileObj.fileName} at ${path} calling optFile`);
         this.nodes.get(path).optFile(FileType.FILE_OPS.CREATE, fileObj);
         KernelLogger.info("NodeTree", `created file ${fileObj.fileName} at ${path}`);
+        
+        // 获取文件内容（用于 PHP 创建）
+        let fileContent = '';
+        if (fileObj.fileContent) {
+            if (Array.isArray(fileObj.fileContent)) {
+                fileContent = fileObj.fileContent.join('\n');
+            } else {
+                fileContent = String(fileObj.fileContent);
+            }
+        }
+        
+        // 通过 PHP 创建真实文件（等待完成）
+        try {
+            await this._createRealFileInPHP(path, fileObj.fileName, fileContent);
+            KernelLogger.debug("NodeTree", `PHP 文件创建成功: ${path}/${fileObj.fileName}`);
+        } catch (e) {
+            KernelLogger.warn("NodeTree", `通过 PHP 创建文件失败: ${path}/${fileObj.fileName}, ${e.message}`);
+        }
+        
         // 创建文件后刷新磁盘使用情况
         try {
             if (
@@ -872,8 +1314,10 @@ class NodeTreeCollection {
             )
                 Disk.update();
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
     }
     // 删除文件
     delete_file(path, fileName) {
@@ -886,6 +1330,12 @@ class NodeTreeCollection {
             fileName: fileName,
         });
         KernelLogger.info("NodeTree", `deleted file ${fileName} at ${path}`);
+        
+        // 通过 PHP 删除真实文件（异步，不阻塞）
+        this._deleteRealFileInPHP(path, fileName).catch(e => {
+            KernelLogger.warn("NodeTree", `通过 PHP 删除文件失败: ${path}/${fileName}, ${e.message}`);
+        });
+        
         // 删除文件后刷新磁盘使用情况
         try {
             if (
@@ -894,8 +1344,10 @@ class NodeTreeCollection {
             )
                 Disk.update();
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
     }
     
     // 创建链接文件
@@ -962,8 +1414,10 @@ class NodeTreeCollection {
                 Disk.update();
             }
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
     }
     
     // 创建链接目录
@@ -1027,8 +1481,10 @@ class NodeTreeCollection {
                 Disk.update();
             }
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
     }
 
     // 重命名文件
@@ -1061,8 +1517,10 @@ class NodeTreeCollection {
             )
                 Disk.update();
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
         return true;
     }
 
@@ -1136,8 +1594,10 @@ class NodeTreeCollection {
             )
                 Disk.update();
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
         return true;
     }
 
@@ -1234,8 +1694,10 @@ class NodeTreeCollection {
                 Disk.update();
             }
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
         return true;
     }
 
@@ -1314,8 +1776,10 @@ class NodeTreeCollection {
                 Disk.update();
             }
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
         return true;
     }
 
@@ -1400,8 +1864,10 @@ class NodeTreeCollection {
                 Disk.update();
             }
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
         return true;
     }
 
@@ -1513,8 +1979,10 @@ class NodeTreeCollection {
                 Disk.update();
             }
         } catch (e) {}
-        // 自动保存到 localStorage
-        this._saveToLocalStorage();
+        // 自动保存到 PHP 文件系统（异步，不阻塞）
+        this._saveToLocalStorage().catch(e => {
+            KernelLogger.warn("NodeTree", `保存文件系统数据失败: ${e.message}`);
+        });
         return true;
     }
 

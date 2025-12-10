@@ -9,7 +9,7 @@ class NotificationManager {
     static CONFIG = {
         // 容器配置
         CONTAINER_WIDTH: 380,
-        CONTAINER_TOP: 20,
+        CONTAINER_TOP: 60,  // 增加顶部距离，避免通知溢出
         CONTAINER_SIDE: 20,
         CONTAINER_MIN_HEIGHT: 100,
         CONTAINER_Z_INDEX: 10000,
@@ -423,25 +423,31 @@ class NotificationManager {
             width: ${config.CONTAINER_WIDTH}px;
             max-width: calc(100vw - ${config.CONTAINER_SIDE * 2}px);
             height: auto;
-            max-height: calc(100vh - ${config.CONTAINER_TOP * 2}px);
+            max-height: calc(100vh - ${config.CONTAINER_TOP}px - 20px);
             z-index: ${config.CONTAINER_Z_INDEX};
             display: none;
             flex-direction: column;
             gap: 12px;
-            padding: 0;
+            padding: 48px 0 0 0;
             pointer-events: none;
             min-height: ${config.CONTAINER_MIN_HEIGHT}px;
+            overflow-y: auto;
+            overflow-x: hidden;
+            box-sizing: border-box;
         `);
         
-        // 创建关闭按钮
+        // 创建关闭按钮（放在容器顶部，避免与通知的关闭按钮重叠）
         const closeButton = NotificationManager._createCloseButton(null, {
             size: config.STYLES.CLOSE_BUTTON_SIZE_CONTAINER,
             className: 'notification-container-close',
             position: 'absolute'
         });
         closeButton.id = 'notification-container-close';
-        closeButton.style.top = '12px';
-        closeButton.style.right = '12px';
+        // 调整位置，避免与通知的关闭按钮重叠
+        // 通知的关闭按钮在 top: 8px, right: 8px（相对于通知元素）
+        // 容器关闭按钮放在更靠上的位置，避免重叠
+        closeButton.style.top = '4px';
+        closeButton.style.right = '8px';
         closeButton.style.zIndex = '10001';
         container.appendChild(closeButton);
         
@@ -920,6 +926,12 @@ class NotificationManager {
         
         KernelLogger.debug("NotificationManager", "开始显示通知容器");
         
+        // 关闭所有任务栏弹出组件（互斥显示）
+        if (typeof TaskbarManager !== 'undefined' && typeof TaskbarManager._closeAllTaskbarPopups === 'function') {
+            TaskbarManager._closeAllTaskbarPopups();
+            KernelLogger.debug("NotificationManager", "已关闭所有任务栏弹出组件");
+        }
+        
         NotificationManager._isShowing = true;
         NotificationManager._updateNotificationContainerPosition();
         
@@ -1175,7 +1187,32 @@ class NotificationManager {
      * @param {Function} options.onClose - 关闭回调（仅用于依赖类型，可选）
      * @returns {string} 通知ID
      */
-    static createNotification(pid, options = {}) {
+    static async createNotification(pid, options = {}) {
+        // 强制权限检查 - 这是安全的关键部分
+        if (typeof PermissionManager !== 'undefined') {
+            try {
+                const hasPermission = await PermissionManager.checkAndRequestPermission(
+                    pid, 
+                    PermissionManager.PERMISSION.SYSTEM_NOTIFICATION
+                );
+                if (!hasPermission) {
+                    // 权限被拒绝，立即拒绝创建通知，不继续执行
+                    const error = new Error(`程序 ${pid} 没有权限创建通知。权限已被用户拒绝。`);
+                    KernelLogger.error("NotificationManager", `通知创建被拒绝: PID ${pid}, 权限: SYSTEM_NOTIFICATION`);
+                    throw error;
+                }
+                // 权限已授予，继续创建通知
+                KernelLogger.debug("NotificationManager", `程序 ${pid} 已获得通知权限，允许创建通知`);
+            } catch (e) {
+                // 权限检查过程中发生错误，也拒绝创建通知
+                KernelLogger.error("NotificationManager", `权限检查失败，拒绝创建通知: PID ${pid}`, e);
+                throw new Error(`权限检查失败: ${e.message}`);
+            }
+        } else {
+            // 权限管理器未加载，记录警告但允许继续（向后兼容）
+            KernelLogger.warn("NotificationManager", `警告: 权限管理器未加载，跳过权限检查: PID ${pid}`);
+        }
+        
         if (!NotificationManager._notificationContainer) {
             NotificationManager._createNotificationContainer();
             if (!NotificationManager._notificationContainer) {
@@ -1265,11 +1302,18 @@ class NotificationManager {
         notificationElement.appendChild(contentContainer);
         
         // 依赖类型通知也需要关闭按钮（添加到通知元素右上角）
+        // 注意：如果通知位于容器顶部，需要调整位置避免与容器关闭按钮重叠
         if (type === 'dependent') {
             const closeButton = NotificationManager._createCloseButton(notificationId, {
                 className: 'notification-dependent-close',
                 position: 'absolute'
             });
+            // 调整依赖类型通知关闭按钮的位置，避免与容器关闭按钮重叠
+            // 容器关闭按钮在 top: 8px, right: 8px（相对于容器）
+            // 通知关闭按钮也在 top: 8px, right: 8px（相对于通知元素），但通知元素在容器内，所以实际位置会下移
+            closeButton.style.top = '8px';
+            closeButton.style.right = '8px';
+            closeButton.style.zIndex = '100';
             notificationElement.appendChild(closeButton);
         }
         
@@ -1327,11 +1371,30 @@ class NotificationManager {
      * @param {string} notificationId - 通知ID
      * @param {boolean} silent - 是否静默移除（不触发回调）
      */
-    static removeNotification(notificationId, silent = false) {
+    static async removeNotification(notificationId, silent = false) {
         const notificationData = NotificationManager._notifications.get(notificationId);
         if (!notificationData) {
             KernelLogger.warn("NotificationManager", `通知不存在: ${notificationId}`);
             return false;
+        }
+        
+        // 权限检查 - 删除通知也需要权限验证（确保只有有权限的程序才能删除通知）
+        const pid = notificationData.pid;
+        if (typeof PermissionManager !== 'undefined') {
+            try {
+                const hasPermission = await PermissionManager.checkAndRequestPermission(
+                    pid, 
+                    PermissionManager.PERMISSION.SYSTEM_NOTIFICATION
+                );
+                if (!hasPermission) {
+                    const error = new Error(`程序 ${pid} 没有权限删除通知。权限已被用户拒绝。`);
+                    KernelLogger.error("NotificationManager", `通知删除被拒绝: PID ${pid}, 通知ID: ${notificationId}`);
+                    throw error;
+                }
+            } catch (e) {
+                KernelLogger.error("NotificationManager", `权限检查失败，拒绝删除通知: PID ${pid}, 通知ID: ${notificationId}`, e);
+                throw new Error(`权限检查失败: ${e.message}`);
+            }
         }
         
         // 清除定时器

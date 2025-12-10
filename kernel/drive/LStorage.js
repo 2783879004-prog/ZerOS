@@ -1,13 +1,17 @@
 // 本地存储管理器
 // 负责本地数据的管理、注册等操作
 // 所有系统依赖的本地数据和程序的本地数据都存储在 D:/LocalSData.json 文件中
+// 通过 PHP 服务 (FSDirve.php) 进行文件读写操作
 
 KernelLogger.info("LStorage", "模块初始化");
 
 class LStorage {
     // 存储文件路径
-    static STORAGE_FILE_PATH = "D:";
+    static STORAGE_FILE_PATH = "D:/";
     static STORAGE_FILE_NAME = "LocalSData.json";
+    
+    // PHP 服务地址
+    static PHP_SERVICE_URL = "/service/FSDirve.php";
     
     // 存储数据结构
     // {
@@ -24,6 +28,13 @@ class LStorage {
     // }
     static _storageData = null;
     static _initialized = false;
+    
+    // 请求缓存（避免频繁请求）
+    static _requestCache = {
+        readCache: null,
+        readCacheTime: 0,
+        cacheTTL: 1000 // 1秒缓存
+    };
     
     /**
      * 初始化本地存储管理器
@@ -54,145 +65,287 @@ class LStorage {
     }
     
     /**
+     * 通过 PHP 服务读取文件
+     * @param {string} path 文件路径（如 "D:"）
+     * @param {string} fileName 文件名（如 "LocalSData.json"）
+     * @returns {Promise<string|null>} 文件内容，失败返回 null
+     */
+    static async _readFileFromPHP(path, fileName) {
+        try {
+            const url = new URL(LStorage.PHP_SERVICE_URL, window.location.origin);
+            url.searchParams.set('action', 'read_file');
+            url.searchParams.set('path', path);
+            url.searchParams.set('fileName', fileName);
+            
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                // 404 表示文件不存在，这是正常的
+                if (response.status === 404) {
+                    KernelLogger.debug("LStorage", `文件不存在: ${path}/${fileName}`);
+                    return null;
+                }
+                // 尝试读取错误响应内容
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            // 检查响应类型
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.status === 'success' && result.data && result.data.content !== undefined) {
+                return result.data.content;
+            } else if (result.status === 'error' && result.message && result.message.includes('不存在')) {
+                // 文件不存在
+                return null;
+            } else {
+                throw new Error(result.message || '读取文件失败');
+            }
+        } catch (error) {
+            // 网络错误或文件不存在
+            if (error.message && error.message.includes('不存在')) {
+                KernelLogger.debug("LStorage", `文件不存在: ${path}/${fileName}`);
+                return null;
+            }
+            KernelLogger.error("LStorage", `通过 PHP 读取文件失败: ${error.message}`, error);
+            throw error;
+        }
+    }
+    
+    /**
+     * 通过 PHP 服务写入文件
+     * @param {string} path 文件路径（如 "D:"）
+     * @param {string} fileName 文件名（如 "LocalSData.json"）
+     * @param {string} content 文件内容
+     * @param {string} writeMod 写入模式（'overwrite', 'append', 'prepend'）
+     * @returns {Promise<boolean>} 是否成功
+     */
+    static async _writeFileToPHP(path, fileName, content, writeMod = 'overwrite') {
+        try {
+            const url = new URL(LStorage.PHP_SERVICE_URL, window.location.origin);
+            url.searchParams.set('action', 'write_file');
+            url.searchParams.set('path', path);
+            url.searchParams.set('fileName', fileName);
+            url.searchParams.set('writeMod', writeMod);
+            
+            const contentSize = typeof content === 'string' ? content.length : JSON.stringify(content).length;
+            KernelLogger.debug("LStorage", `准备写入文件: ${path}/${fileName}, 内容大小: ${contentSize} 字节, 模式: ${writeMod}`);
+            
+            // 使用 POST 请求传递内容（避免 URL 过长）
+            const requestBody = JSON.stringify({ content: content });
+            KernelLogger.debug("LStorage", `POST 请求体大小: ${requestBody.length} 字节`);
+            
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: requestBody
+            });
+            
+            KernelLogger.debug("LStorage", `PHP 响应状态: ${response.status} ${response.statusText}`);
+            
+            if (!response.ok) {
+                // 尝试读取错误响应内容
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                } else {
+                    try {
+                        const errorJson = await response.json();
+                        errorText += `\nPHP 错误: ${JSON.stringify(errorJson)}`;
+                    } catch (e) {
+                        const errorText2 = await response.text();
+                        errorText += `\nPHP 错误响应: ${errorText2.substring(0, 500)}`;
+                    }
+                }
+                KernelLogger.error("LStorage", `PHP 写入文件失败: ${errorText}`);
+                throw new Error(errorText);
+            }
+            
+            // 检查响应类型
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                KernelLogger.error("LStorage", `PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            KernelLogger.debug("LStorage", `PHP 响应结果: ${JSON.stringify(result).substring(0, 200)}`);
+            
+            if (result.status === 'success') {
+                // 清除读取缓存
+                LStorage._requestCache.readCache = null;
+                LStorage._requestCache.readCacheTime = 0;
+                KernelLogger.info("LStorage", `文件写入成功: ${path}/${fileName}`);
+                return true;
+            } else {
+                const errorMsg = result.message || '写入文件失败';
+                KernelLogger.error("LStorage", `PHP 写入文件失败: ${errorMsg}`);
+                throw new Error(errorMsg);
+            }
+        } catch (error) {
+            KernelLogger.error("LStorage", `通过 PHP 写入文件失败: ${error.message}`, error);
+            KernelLogger.error("LStorage", `错误堆栈: ${error.stack || '无堆栈信息'}`);
+            throw error;
+        }
+    }
+    
+    /**
+     * 通过 PHP 服务检查文件是否存在
+     * @param {string} path 文件路径（如 "D:"）
+     * @param {string} fileName 文件名（如 "LocalSData.json"）
+     * @returns {Promise<boolean>} 文件是否存在
+     */
+    static async _fileExistsInPHP(path, fileName) {
+        try {
+            const url = new URL(LStorage.PHP_SERVICE_URL, window.location.origin);
+            url.searchParams.set('action', 'exists');
+            url.searchParams.set('path', `${path}/${fileName}`);
+            
+            const response = await fetch(url.toString(), {
+                method: 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            });
+            
+            if (!response.ok) {
+                return false;
+            }
+            
+            // 检查响应类型
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                KernelLogger.warn("LStorage", `PHP 返回了非 JSON 响应: ${text.substring(0, 200)}`);
+                return false;
+            }
+            
+            const result = await response.json();
+            
+            if (result.status === 'success' && result.data && result.data.exists) {
+                return result.data.type === 'file';
+            }
+            
+            return false;
+        } catch (error) {
+            KernelLogger.debug("LStorage", `检查文件是否存在失败: ${error.message}`);
+            return false;
+        }
+    }
+    
+    /**
+     * 通过 PHP 服务创建文件
+     * @param {string} path 文件路径（如 "D:"）
+     * @param {string} fileName 文件名（如 "LocalSData.json"）
+     * @param {string} content 文件内容
+     * @returns {Promise<boolean>} 是否成功
+     */
+    static async _createFileInPHP(path, fileName, content = '') {
+        try {
+            const url = new URL(LStorage.PHP_SERVICE_URL, window.location.origin);
+            url.searchParams.set('action', 'create_file');
+            url.searchParams.set('path', path);
+            url.searchParams.set('fileName', fileName);
+            
+            const response = await fetch(url.toString(), {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ content: content })
+            });
+            
+            if (!response.ok) {
+                // 409 表示文件已存在，这是正常的
+                if (response.status === 409) {
+                    KernelLogger.debug("LStorage", `文件已存在: ${path}/${fileName}`);
+                    return true; // 视为成功
+                }
+                // 尝试读取错误响应内容
+                const contentType = response.headers.get('content-type');
+                let errorText = `HTTP ${response.status}: ${response.statusText}`;
+                if (contentType && contentType.includes('text/html')) {
+                    const htmlText = await response.text();
+                    errorText += `\nPHP 错误响应: ${htmlText.substring(0, 500)}`;
+                }
+                throw new Error(errorText);
+            }
+            
+            // 检查响应类型
+            const contentType = response.headers.get('content-type');
+            if (!contentType || !contentType.includes('application/json')) {
+                const text = await response.text();
+                throw new Error(`PHP 返回了非 JSON 响应: ${text.substring(0, 500)}`);
+            }
+            
+            const result = await response.json();
+            
+            if (result.status === 'success') {
+                // 清除读取缓存
+                LStorage._requestCache.readCache = null;
+                LStorage._requestCache.readCacheTime = 0;
+                return true;
+            } else if (result.status === 'error' && result.message && result.message.includes('已存在')) {
+                // 文件已存在，视为成功
+                return true;
+            } else {
+                throw new Error(result.message || '创建文件失败');
+            }
+        } catch (error) {
+            // 文件已存在视为成功
+            if (error.message && error.message.includes('已存在')) {
+                KernelLogger.debug("LStorage", `文件已存在: ${path}/${fileName}`);
+                return true;
+            }
+            KernelLogger.error("LStorage", `通过 PHP 创建文件失败: ${error.message}`, error);
+            throw error;
+        }
+    }
+    
+    /**
      * 从文件加载存储数据
      * @param {boolean} allowSave 是否允许保存（初始化时允许）
      * @returns {Promise<void>}
      */
     static async _loadStorageData(allowSave = false) {
         try {
-            // 首先检查 Disk 是否可用
-            if (typeof Disk === 'undefined') {
-                KernelLogger.warn("LStorage", "Disk 模块未定义，创建空数据结构");
-                LStorage._storageData = {
-                    system: {},
-                    programs: {}
-                };
-                return;
-            }
-            
-            // 等待 Disk 初始化完成
-            if (!Disk.canUsed) {
-                KernelLogger.debug("LStorage", "Disk 未初始化，等待初始化...");
-                let diskWaitCount = 0;
-                const maxDiskWaitCount = 100; // 最多等待10秒
-                
-                while (diskWaitCount < maxDiskWaitCount && !Disk.canUsed) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    diskWaitCount++;
-                }
-                
-                if (!Disk.canUsed) {
-                    KernelLogger.warn("LStorage", "Disk 初始化超时，创建空数据结构");
-                    LStorage._storageData = {
-                        system: {},
-                        programs: {}
-                    };
-                    return;
-                }
-            }
-            
-            // 获取 D: 分区的 NodeTreeCollection
-            const diskSeparateMap = Disk.diskSeparateMap;
-            let dPartition = diskSeparateMap.get("D:");
-            
-            // 如果 D: 分区不存在，尝试从 POOL 获取
-            if (!dPartition && typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
-                try {
-                    dPartition = POOL.__GET__("KERNEL_GLOBAL_POOL", "D:");
-                    if (dPartition) {
-                        // 如果从 POOL 获取成功，也更新 diskSeparateMap（保持一致性）
-                        Disk.setMap("diskSeparateMap", "D:", dPartition);
-                        KernelLogger.debug("LStorage", "从 POOL 获取 D: 分区成功");
-                    }
-                } catch (e) {
-                    KernelLogger.debug("LStorage", `从 POOL 获取 D: 分区失败: ${e.message}`);
-                }
-            }
-            
-            // 如果 D: 分区不存在，等待它创建（最多等待10秒）
-            if (!dPartition) {
-                KernelLogger.debug("LStorage", "D: 分区不存在，等待创建...");
-                let waitCount = 0;
-                const maxWaitCount = 100; // 最多等待10秒（100 * 100ms）
-                
-                while (waitCount < maxWaitCount && !dPartition) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    
-                    // 尝试从 diskSeparateMap 获取
-                    dPartition = diskSeparateMap.get("D:");
-                    
-                    // 如果仍然不存在，尝试从 POOL 获取
-                    if (!dPartition && typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
-                        try {
-                            dPartition = POOL.__GET__("KERNEL_GLOBAL_POOL", "D:");
-                            if (dPartition) {
-                                // 如果从 POOL 获取成功，也更新 diskSeparateMap（保持一致性）
-                                Disk.setMap("diskSeparateMap", "D:", dPartition);
-                                KernelLogger.debug("LStorage", "从 POOL 获取 D: 分区成功（等待期间）");
-                            }
-                        } catch (e) {
-                            // 忽略错误，继续等待
-                        }
-                    }
-                    
-                    waitCount++;
-                }
-                
-                if (!dPartition) {
-                    KernelLogger.warn("LStorage", "D: 分区不存在，创建空数据结构");
-                    LStorage._storageData = {
-                        system: {},
-                        programs: {}
-                    };
-                    return;
-                }
-            }
-            
-            // 等待 D: 分区初始化完成（NodeTreeCollection 的初始化是异步的）
-            if (dPartition.initialized === false) {
-                KernelLogger.debug("LStorage", "D: 分区存在但未初始化，等待初始化完成...");
-                let initWaitCount = 0;
-                const maxInitWaitCount = 100; // 最多等待10秒（100 * 100ms）
-                
-                while (initWaitCount < maxInitWaitCount && dPartition.initialized === false) {
-                    await new Promise(resolve => setTimeout(resolve, 100));
-                    initWaitCount++;
-                }
-                
-                if (dPartition.initialized === false) {
-                    KernelLogger.warn("LStorage", "D: 分区初始化超时，创建空数据结构");
-                    LStorage._storageData = {
-                        system: {},
-                        programs: {}
-                    };
-                    return;
-                }
-            }
-            
-            // 检查文件是否存在
             const filePath = LStorage.STORAGE_FILE_PATH;
             const fileName = LStorage.STORAGE_FILE_NAME;
             
-            // 检查文件是否存在
-            const node = dPartition.getNode(filePath);
-            if (!node) {
-                KernelLogger.info("LStorage", "存储文件不存在，创建新文件");
-                LStorage._storageData = {
-                    system: {},
-                    programs: {}
-                };
-                if (allowSave) {
-                    // 临时标记为已初始化，允许保存
-                    const wasInitialized = LStorage._initialized;
-                    LStorage._initialized = true;
-                    await LStorage._saveStorageData();
-                    LStorage._initialized = wasInitialized;
-                }
+            // 检查缓存
+            const now = Date.now();
+            if (LStorage._requestCache.readCache !== null && 
+                (now - LStorage._requestCache.readCacheTime) < LStorage._requestCache.cacheTTL) {
+                KernelLogger.debug("LStorage", "使用缓存数据");
+                LStorage._storageData = LStorage._requestCache.readCache;
                 return;
             }
             
             // 检查文件是否存在
-            if (!node.attributes || !node.attributes[fileName]) {
+            const fileExists = await LStorage._fileExistsInPHP(filePath, fileName);
+            
+            if (!fileExists) {
                 KernelLogger.info("LStorage", "存储文件不存在，创建新文件");
                 LStorage._storageData = {
                     system: {},
@@ -209,7 +362,8 @@ class LStorage {
             }
             
             // 读取文件内容
-            const fileContent = dPartition.read_file(filePath, fileName);
+            const fileContent = await LStorage._readFileFromPHP(filePath, fileName);
+            
             if (!fileContent) {
                 KernelLogger.warn("LStorage", "存储文件为空，使用空数据结构");
                 LStorage._storageData = {
@@ -220,22 +374,8 @@ class LStorage {
             }
             
             // 解析 JSON
-            let contentString = '';
-            if (Array.isArray(fileContent)) {
-                contentString = fileContent.join('\n');
-            } else if (typeof fileContent === 'string') {
-                contentString = fileContent;
-            } else {
-                KernelLogger.warn("LStorage", "存储文件格式不正确，使用空数据结构");
-                LStorage._storageData = {
-                    system: {},
-                    programs: {}
-                };
-                return;
-            }
-            
             try {
-                LStorage._storageData = JSON.parse(contentString);
+                LStorage._storageData = JSON.parse(fileContent);
                 
                 // 验证数据结构
                 if (!LStorage._storageData || typeof LStorage._storageData !== 'object') {
@@ -249,12 +389,24 @@ class LStorage {
                     LStorage._storageData.programs = {};
                 }
                 
+                // 更新缓存
+                LStorage._requestCache.readCache = LStorage._storageData;
+                LStorage._requestCache.readCacheTime = now;
+                
                 // 记录加载的数据摘要（用于调试）
                 const systemKeys = Object.keys(LStorage._storageData.system || {});
                 const programCount = Object.keys(LStorage._storageData.programs || {}).length;
                 KernelLogger.info("LStorage", `存储数据加载成功 (系统键: ${systemKeys.length}, 程序: ${programCount})`);
                 if (systemKeys.length > 0) {
                     KernelLogger.debug("LStorage", `系统存储键: ${systemKeys.join(', ')}`);
+                }
+                // 特别检查 desktop.icons
+                if (systemKeys.includes('desktop.icons')) {
+                    const iconsData = LStorage._storageData.system['desktop.icons'];
+                    const iconCount = Array.isArray(iconsData) ? iconsData.length : 0;
+                    KernelLogger.info("LStorage", `桌面图标已加载: ${iconCount} 个图标`);
+                } else {
+                    KernelLogger.debug("LStorage", "桌面图标数据不存在（首次运行或未保存）");
                 }
             } catch (parseError) {
                 KernelLogger.error("LStorage", `解析存储文件失败: ${parseError.message}`, parseError);
@@ -283,122 +435,88 @@ class LStorage {
         }
         
         try {
-            // 获取 D: 分区的 NodeTreeCollection
-            // 首先尝试从 diskSeparateMap 获取
-            let diskSeparateMap = Disk.diskSeparateMap;
-            let dPartition = diskSeparateMap.get("D:");
-            
-            // 如果从 diskSeparateMap 获取失败，尝试从 POOL 获取
-            if (!dPartition && typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
-                try {
-                    dPartition = POOL.__GET__("KERNEL_GLOBAL_POOL", "D:");
-                    if (dPartition) {
-                        // 如果从 POOL 获取成功，也更新 diskSeparateMap（保持一致性）
-                        diskSeparateMap.set("D:", dPartition);
-                        // 更新缓存
-                        Disk._diskSeparateMapCache = diskSeparateMap;
-                        KernelLogger.debug("LStorage", "从 POOL 获取 D: 分区成功（保存时）");
-                    }
-                } catch (e) {
-                    KernelLogger.debug("LStorage", `从 POOL 获取 D: 分区失败: ${e.message}`);
-                }
-            }
-            
-            if (!dPartition) {
-                // D: 分区不存在是预期的、可恢复的情况（在系统启动初期）
-                // 使用 debug 级别而不是 error，因为调用者会处理这种情况并安排延迟保存
-                KernelLogger.debug("LStorage", "D: 分区不存在，无法保存（这是预期的，将在分区可用后自动重试）");
-                throw new Error("D: 分区不存在");
-            }
-            
-            // 检查 D: 分区是否已初始化（如果分区对象有 initialized 属性）
-            if (dPartition.initialized === false) {
-                KernelLogger.debug("LStorage", "D: 分区存在但未初始化，等待初始化完成");
-                throw new Error("D: 分区未初始化");
-            }
-            
             const filePath = LStorage.STORAGE_FILE_PATH;
             const fileName = LStorage.STORAGE_FILE_NAME;
             
-            // 确保目录存在（D: 分区根目录应该已经存在）
-            // 如果 filePath 不是根目录，需要检查并创建
-            if (filePath && filePath !== "D:" && !dPartition.hasNode(filePath)) {
-                KernelLogger.info("LStorage", `创建目录: ${filePath}`);
-                // 解析路径并创建目录
-                const pathParts = filePath.split('/').filter(p => p && p !== 'D:');
-                let currentPath = "D:";
-                for (const part of pathParts) {
-                    const nextPath = currentPath === "D:" ? `D:/${part}` : `${currentPath}/${part}`;
-                    if (!dPartition.hasNode(nextPath)) {
-                        dPartition.create_dir(currentPath, part);
-                    }
-                    currentPath = nextPath;
-                }
-            }
-            
-            // 确保文件存在
-            const node = dPartition.getNode(filePath);
-            if (!node || !node.attributes || !node.attributes[fileName]) {
-                KernelLogger.info("LStorage", `创建文件: ${filePath}/${fileName}`);
-                // 创建文件
-                const FileTypeRef = getFileType();
-                if (FileTypeRef) {
-                    const fileObj = new FileFormwork(
-                        FileTypeRef.GENRE.JSON,
-                        fileName,
-                        "{}",
-                        `${filePath}/${fileName}`
-                    );
-                    dPartition.create_file(filePath, fileObj);
-                } else {
-                    KernelLogger.error("LStorage", "FileType 不可用，无法创建文件");
-                    throw new Error("FileType 不可用");
-                }
-            }
-            
             // 将数据转换为 JSON 字符串
             const jsonString = JSON.stringify(LStorage._storageData, null, 2);
+            KernelLogger.debug("LStorage", `准备保存存储数据: ${filePath}/${fileName}, JSON 大小: ${jsonString.length} 字节`);
             
-            // 获取 FileType 以使用正确的写入模式
-            const FileTypeRef = getFileType();
-            if (!FileTypeRef || !FileTypeRef.WRITE_MODES) {
-                KernelLogger.error("LStorage", "FileType.WRITE_MODES 不可用，无法写入文件");
-                throw new Error("FileType.WRITE_MODES 不可用");
-            }
-            
-            // 写入文件（使用覆盖模式）
-            dPartition.write_file(filePath, fileName, jsonString, FileTypeRef.WRITE_MODES.OVERWRITE);
-            
-            // 确保文件对象已刷新信息并保存到 localStorage
-            const fileNode = dPartition.getNode(filePath);
-            if (fileNode && fileNode.attributes && fileNode.attributes[fileName]) {
-                const fileObj = fileNode.attributes[fileName];
-                if (fileObj && typeof fileObj.refreshInfo === 'function') {
-                    fileObj.refreshInfo();
+            // 特别检查 desktop.icons 是否存在
+            if (LStorage._storageData.system && LStorage._storageData.system['desktop.icons']) {
+                const iconsData = LStorage._storageData.system['desktop.icons'];
+                const iconCount = Array.isArray(iconsData) ? iconsData.length : 0;
+                KernelLogger.info("LStorage", `准备保存桌面图标: ${iconCount} 个图标`);
+                if (iconCount > 0) {
+                    KernelLogger.debug("LStorage", `桌面图标数据: ${JSON.stringify(iconsData).substring(0, 500)}...`);
                 }
             }
             
-            // 确保文件系统已保存到 localStorage（write_file 应该已经调用了，但为了确保，再次调用）
-            if (typeof dPartition._saveToLocalStorage === 'function') {
-                dPartition._saveToLocalStorage();
+            // 检查文件是否存在
+            const fileExists = await LStorage._fileExistsInPHP(filePath, fileName);
+            KernelLogger.debug("LStorage", `文件存在检查: ${filePath}/${fileName} = ${fileExists}`);
+            
+            if (!fileExists) {
+                // 文件不存在，创建文件
+                KernelLogger.info("LStorage", `创建存储文件: ${filePath}/${fileName}`);
+                await LStorage._createFileInPHP(filePath, fileName, jsonString);
+            } else {
+                // 文件存在，写入文件（覆盖模式）
+                await LStorage._writeFileToPHP(filePath, fileName, jsonString, 'overwrite');
             }
+            
+            // 验证保存是否真的成功（读取文件验证）
+            try {
+                KernelLogger.debug("LStorage", `验证文件是否保存成功: ${filePath}/${fileName}`);
+                const savedContent = await LStorage._readFileFromPHP(filePath, fileName);
+                if (savedContent) {
+                    const savedData = JSON.parse(savedContent);
+                    const savedSystemKeys = Object.keys(savedData.system || {});
+                    KernelLogger.info("LStorage", `文件保存验证成功: 系统键数量=${savedSystemKeys.length}`);
+                    
+                    // 特别验证 desktop.icons
+                    if (savedData.system && savedData.system['desktop.icons']) {
+                        const savedIcons = savedData.system['desktop.icons'];
+                        const savedIconCount = Array.isArray(savedIcons) ? savedIcons.length : 0;
+                        KernelLogger.info("LStorage", `桌面图标保存验证成功: ${savedIconCount} 个图标已确认保存到文件`);
+                    } else {
+                        KernelLogger.warn("LStorage", "桌面图标保存验证失败: 文件中没有 desktop.icons 数据");
+                    }
+                } else {
+                    KernelLogger.warn("LStorage", "文件保存验证失败: 无法读取保存的文件");
+                }
+            } catch (verifyError) {
+                KernelLogger.warn("LStorage", `文件保存验证失败: ${verifyError.message}`, verifyError);
+            }
+            
+            // 更新缓存
+            LStorage._requestCache.readCache = LStorage._storageData;
+            LStorage._requestCache.readCacheTime = Date.now();
             
             // 记录保存的数据摘要（用于调试）
             const systemKeys = Object.keys(LStorage._storageData.system || {});
-            const savedDataSize = JSON.stringify(LStorage._storageData).length;
+            const savedDataSize = jsonString.length;
             KernelLogger.info("LStorage", `存储数据保存成功 (大小: ${savedDataSize} 字节, 系统键: ${systemKeys.length})`);
+            if (systemKeys.length > 0) {
+                KernelLogger.debug("LStorage", `保存的系统存储键: ${systemKeys.join(', ')}`);
+            }
+            if (systemKeys.includes('desktop.icons')) {
+                const iconsData = LStorage._storageData.system['desktop.icons'];
+                const iconCount = Array.isArray(iconsData) ? iconsData.length : 0;
+                KernelLogger.info("LStorage", `桌面图标已保存到文件: ${iconCount} 个图标`);
+                if (iconCount > 0) {
+                    KernelLogger.debug("LStorage", `桌面图标数据示例: ${JSON.stringify(iconsData[0]).substring(0, 200)}...`);
+                }
+            }
             if (systemKeys.includes('system.desktopBackground')) {
                 KernelLogger.debug("LStorage", `桌面背景已保存到文件: ${LStorage._storageData.system['system.desktopBackground']}`);
             }
+            
+            // 验证保存是否真的成功（可选：读取文件验证，但会增加性能开销）
+            // 这里我们只验证内存中的数据是否正确
+            KernelLogger.debug("LStorage", `保存完成，文件路径: ${filePath}/${fileName}`);
         } catch (error) {
-            // 如果错误是 D: 分区不存在或未初始化，这是预期的、可恢复的情况
-            // 调用者会处理这种情况并安排延迟保存，所以使用 debug 级别
-            if (error.message && (error.message.includes('分区不存在') || error.message.includes('分区未初始化'))) {
-                KernelLogger.debug("LStorage", `保存存储数据失败（预期情况）: ${error.message}`);
-            } else {
-                // 其他错误是真正的错误，使用 error 级别
-                KernelLogger.error("LStorage", `保存存储数据失败: ${error.message}`, error);
-            }
+            KernelLogger.error("LStorage", `保存存储数据失败: ${error.message}`, error);
             throw error; // 重新抛出错误，让调用者知道保存失败
         }
     }
@@ -562,37 +680,45 @@ class LStorage {
             await LStorage.init();
         }
         
-        KernelLogger.info("LStorage", `写入系统存储: Key=${key}`);
+        KernelLogger.info("LStorage", `写入系统存储: Key=${key}, Value类型=${typeof value}, 是否为数组=${Array.isArray(value)}`);
+        if (Array.isArray(value)) {
+            KernelLogger.debug("LStorage", `数组长度: ${value.length}`);
+        }
         
         try {
             // 先更新内存中的数据
             LStorage._storageData.system[key] = value;
+            KernelLogger.debug("LStorage", `内存数据已更新: Key=${key}`);
             
             // 尝试保存到文件系统
             try {
                 await LStorage._saveStorageData();
-                KernelLogger.debug("LStorage", `系统存储写入成功: Key=${key}`);
+                KernelLogger.info("LStorage", `系统存储写入成功: Key=${key}`);
+                
+                // 验证保存是否真的成功（读取文件验证）
+                try {
+                    const savedValue = LStorage._storageData.system[key];
+                    if (savedValue === undefined || savedValue === null) {
+                        KernelLogger.warn("LStorage", `保存后验证失败: Key=${key} 在内存中不存在`);
+                        return false;
+                    }
+                    KernelLogger.debug("LStorage", `保存验证成功: Key=${key} 已存在于内存中`);
+                } catch (verifyError) {
+                    KernelLogger.warn("LStorage", `保存验证失败: ${verifyError.message}`);
+                }
+                
                 return true;
             } catch (saveError) {
-                // 如果保存失败，但数据已经在内存中，记录警告但不返回错误
-                // 这样调用者可以继续使用，数据会在下次成功保存时持久化
-                if (saveError.message && (saveError.message.includes('分区不存在') || saveError.message.includes('分区未初始化'))) {
-                    KernelLogger.debug("LStorage", `D: 分区尚未初始化，数据已保存在内存中，将在分区可用后自动保存: Key=${key}`);
-                    // 安排延迟保存
-                    LStorage._scheduleDelayedSave();
-                    return true; // 返回成功，因为数据已经在内存中
-                } else if (saveError.message && saveError.message.includes('空间不足')) {
-                    // 空间不足错误：记录错误并返回失败
-                    KernelLogger.error("LStorage", `保存系统存储失败: 磁盘空间不足 - ${saveError.message}`, saveError);
-                    return false;
-                } else {
-                    // 其他错误，记录并返回失败
-                    KernelLogger.warn("LStorage", `保存系统存储失败: ${saveError.message}`, saveError);
-                    return false;
-                }
+                // 如果保存失败，记录错误并返回 false
+                KernelLogger.error("LStorage", `保存系统存储失败: Key=${key}, Error: ${saveError.message}`, saveError);
+                KernelLogger.error("LStorage", `错误堆栈: ${saveError.stack || '无堆栈信息'}`);
+                // 安排延迟保存
+                LStorage._scheduleDelayedSave();
+                return false; // 返回失败，让调用者知道保存未成功
             }
         } catch (error) {
             KernelLogger.error("LStorage", `写入系统存储失败: ${error.message}`, error);
+            KernelLogger.error("LStorage", `错误堆栈: ${error.stack || '无堆栈信息'}`);
             return false;
         }
     }
@@ -605,12 +731,12 @@ class LStorage {
     /**
      * 延迟保存检查间隔（毫秒）
      */
-    static _delayedSaveInterval = 1000; // 1秒检查一次，更快响应
+    static _delayedSaveInterval = 2000; // 2秒检查一次
     
     /**
      * 最大延迟保存重试次数（避免无限重试）
      */
-    static _maxDelayedSaveRetries = 300; // 最多重试300次（约5分钟）
+    static _maxDelayedSaveRetries = 150; // 最多重试150次（约5分钟）
     
     /**
      * 当前延迟保存重试次数
@@ -633,7 +759,7 @@ class LStorage {
             return;
         }
         
-        // 设置新的延迟保存（1秒后重试，更快响应）
+        // 设置新的延迟保存（2秒后重试）
         LStorage._delayedSaveTimer = setTimeout(async () => {
             LStorage._delayedSaveTimer = null;
             LStorage._delayedSaveRetryCount++;
@@ -644,13 +770,8 @@ class LStorage {
                 LStorage._delayedSaveRetryCount = 0; // 重置重试计数
             } catch (e) {
                 // 如果仍然失败，再次安排延迟保存
-                if (e.message && (e.message.includes('分区不存在') || e.message.includes('分区未初始化'))) {
-                    KernelLogger.debug("LStorage", `D: 分区仍未初始化，将继续等待（重试 ${LStorage._delayedSaveRetryCount}/${LStorage._maxDelayedSaveRetries}）`);
-                    LStorage._scheduleDelayedSave();
-                } else {
-                    KernelLogger.warn("LStorage", `延迟保存失败: ${e.message}`);
-                    LStorage._delayedSaveRetryCount = 0; // 重置重试计数（非分区错误）
-                }
+                KernelLogger.debug("LStorage", `延迟保存失败，将继续重试（重试 ${LStorage._delayedSaveRetryCount}/${LStorage._maxDelayedSaveRetries}）: ${e.message}`);
+                LStorage._scheduleDelayedSave();
             }
         }, LStorage._delayedSaveInterval);
     }
@@ -701,20 +822,15 @@ class LStorage {
         
         return LStorage._storageData.system || {};
     }
-}
-
-// 辅助函数：从 POOL 或全局对象获取 FileType
-function getFileType() {
-    let FileTypeRef = null;
-    if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
-        try {
-            FileTypeRef = POOL.__GET__("TYPE_POOL", "FileType");
-        } catch (e) {}
+    
+    /**
+     * 清除读取缓存（用于强制刷新）
+     */
+    static clearCache() {
+        LStorage._requestCache.readCache = null;
+        LStorage._requestCache.readCacheTime = 0;
+        KernelLogger.debug("LStorage", "读取缓存已清除");
     }
-    if (!FileTypeRef && typeof FileType !== 'undefined') {
-        FileTypeRef = FileType;
-    }
-    return FileTypeRef;
 }
 
 // 注册到 POOL
@@ -733,4 +849,3 @@ if (typeof POOL !== 'undefined' && typeof POOL.__ADD__ === 'function') {
 if (typeof DependencyConfig !== 'undefined') {
     DependencyConfig.publishSignal("../kernel/drive/LStorage.js");
 }
-

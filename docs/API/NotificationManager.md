@@ -8,6 +8,7 @@
 
 - `TaskbarManager` - 任务栏管理器（用于获取任务栏位置和显示通知图标）
 - `ProcessManager` - 进程管理器（用于获取程序信息）
+- `PermissionManager` - 权限管理器（用于权限检查和验证）
 - `GUIManager` - GUI 管理器（用于窗口管理）
 - `AnimateManager` - 动画管理器（用于水滴动画效果）
 
@@ -98,7 +99,7 @@ NotificationManager.CONFIG = {
 
 #### `createNotification(pid, options)`
 
-创建通知。
+创建通知。**需要 `SYSTEM_NOTIFICATION` 权限**，会自动进行权限检查。
 
 **参数**:
 - `pid` (number): 程序 PID
@@ -109,42 +110,68 @@ NotificationManager.CONFIG = {
   - `duration` (number): 自动关闭时长（毫秒，0 表示不自动关闭，可选）
   - `onClose` (Function): 关闭回调（可选，仅 dependent 类型），`(notificationId, pid) => {}`
 
-**返回值**: `string` - 通知 ID
+**返回值**: `Promise<string>` - 通知 ID
+
+**权限检查**:
+- 创建通知需要 `SYSTEM_NOTIFICATION` 权限
+- 如果程序没有权限，会弹出权限请求对话框
+- 如果用户拒绝权限，方法会抛出错误
+- 程序必须在 `__info__` 中声明 `SYSTEM_NOTIFICATION` 权限
 
 **示例**:
 ```javascript
-// 创建快照通知
-const notificationId = NotificationManager.createNotification(this.pid, {
-    type: 'snapshot',
-    title: '系统通知',
-    content: '这是一条通知消息',
-    duration: 5000  // 5秒后自动关闭
-});
+// 创建快照通知（异步，需要 await）
+try {
+    const notificationId = await NotificationManager.createNotification(this.pid, {
+        type: 'snapshot',
+        title: '系统通知',
+        content: '这是一条通知消息',
+        duration: 5000  // 5秒后自动关闭
+    });
+    console.log('通知已创建:', notificationId);
+} catch (e) {
+    if (e.message.includes('没有权限')) {
+        console.error('权限被拒绝，无法创建通知');
+    } else {
+        console.error('创建通知失败:', e.message);
+    }
+}
 
-// 创建依赖通知
+// 创建依赖通知（异步，需要 await）
 const contentElement = document.createElement('div');
 contentElement.innerHTML = '<div>音乐播放器内容</div>';
 
-const dependentId = NotificationManager.createNotification(this.pid, {
-    type: 'dependent',
-    content: contentElement,
-    onClose: (notificationId, pid) => {
-        console.log('通知已关闭:', notificationId);
-    }
-});
+try {
+    const dependentId = await NotificationManager.createNotification(this.pid, {
+        type: 'dependent',
+        content: contentElement,
+        onClose: (notificationId, pid) => {
+            console.log('通知已关闭:', notificationId);
+        }
+    });
+    console.log('依赖通知已创建:', dependentId);
+} catch (e) {
+    console.error('创建依赖通知失败:', e.message);
+}
 ```
 
 ### 移除通知
 
 #### `removeNotification(notificationId, silent)`
 
-移除通知。
+移除通知。**需要 `SYSTEM_NOTIFICATION` 权限**，会自动进行权限检查。
 
 **参数**:
 - `notificationId` (string): 通知 ID
 - `silent` (boolean): 是否静默移除（不触发回调），默认 `false`
 
-**返回值**: `boolean` - 是否成功
+**返回值**: `Promise<boolean>` - 是否成功
+
+**权限检查**:
+- 移除通知需要 `SYSTEM_NOTIFICATION` 权限
+- 如果程序没有权限，会弹出权限请求对话框
+- 如果用户拒绝权限，方法会抛出错误
+- 程序必须在 `__info__` 中声明 `SYSTEM_NOTIFICATION` 权限
 
 **示例**:
 ```javascript

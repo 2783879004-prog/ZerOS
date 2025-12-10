@@ -73,6 +73,12 @@
             "../kernel/drive/LStorage.js"
         ],
         
+        // 第十一层：权限管理器（依赖进程管理器和本地存储管理器）
+        "../kernel/process/permissionManager.js": [
+            "../kernel/process/processManager.js",
+            "../kernel/drive/LStorage.js"
+        ],
+        
         // 第十二层：动画管理器（依赖动态模块管理器，用于管理 animate.css）
         "../kernel/drive/animateManager.js": [
             "../kernel/dynamicModule/dynamicManager.js"
@@ -597,6 +603,21 @@
             check('ThemeManager.setTheme', typeof ThemeManager.setTheme === 'function');
             check('ThemeManager.getCurrentTheme', typeof ThemeManager.getCurrentTheme === 'function');
             check('ThemeManager.setDesktopBackground', typeof ThemeManager.setDesktopBackground === 'function');
+            check('ThemeManager.setLocalImageAsBackground', typeof ThemeManager.setLocalImageAsBackground === 'function');
+            check('ThemeManager.getCurrentDesktopBackground', typeof ThemeManager.getCurrentDesktopBackground === 'function');
+            check('ThemeManager.getAllDesktopBackgrounds', typeof ThemeManager.getAllDesktopBackgrounds === 'function');
+            try {
+                const currentBg = ThemeManager.getCurrentDesktopBackground ? ThemeManager.getCurrentDesktopBackground() : null;
+                if (currentBg) {
+                    const bgInfo = ThemeManager.getDesktopBackground ? ThemeManager.getDesktopBackground(currentBg) : null;
+                    const isGif = bgInfo && bgInfo.path && bgInfo.path.toLowerCase().endsWith('.gif');
+                    if (isGif) {
+                        info('桌面背景', `${currentBg} (GIF动图)`);
+                    }
+                }
+            } catch (e) {
+                warn('主题信息', `获取失败: ${e.message}`);
+            }
         }
         
         check('DesktopManager', typeof DesktopManager !== 'undefined');
@@ -612,8 +633,23 @@
             check('NotificationManager.createNotification', typeof NotificationManager.createNotification === 'function');
             check('NotificationManager.removeNotification', typeof NotificationManager.removeNotification === 'function');
         }
+        check('PermissionManager', typeof PermissionManager !== 'undefined');
+        if (typeof PermissionManager !== 'undefined') {
+            check('PermissionManager.init', typeof PermissionManager.init === 'function');
+            check('PermissionManager.checkAndRequestPermission', typeof PermissionManager.checkAndRequestPermission === 'function');
+            check('PermissionManager.registerProgramPermissions', typeof PermissionManager.registerProgramPermissions === 'function');
+        }
         check('ContextMenuManager', typeof ContextMenuManager !== 'undefined');
+        if (typeof ContextMenuManager !== 'undefined') {
+            check('ContextMenuManager.registerContextMenu', typeof ContextMenuManager.registerContextMenu === 'function');
+            check('ContextMenuManager.registerMenu', typeof ContextMenuManager.registerMenu === 'function');
+        }
         check('EventManager', typeof EventManager !== 'undefined');
+        if (typeof EventManager !== 'undefined') {
+            check('EventManager.registerDrag', typeof EventManager.registerDrag === 'function');
+            check('EventManager.registerResizer', typeof EventManager.registerResizer === 'function');
+            check('EventManager.registerMenu', typeof EventManager.registerMenu === 'function');
+        }
         
         // ========== 7. 其他模块检查 ==========
         updateProgress(7, '检查其他模块...', 90);

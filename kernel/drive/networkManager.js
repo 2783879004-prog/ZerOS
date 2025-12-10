@@ -86,15 +86,33 @@
             }
             
             try {
+                // 检查是否为 localhost 且使用 HTTPS（可能存在证书问题）
+                const isLocalhost = window.location.hostname === 'localhost' || 
+                                   window.location.hostname === '127.0.0.1' ||
+                                   window.location.hostname === '[::1]';
+                const isHTTPS = protocol === 'https:';
+                
+                // 对于 localhost 的 HTTPS，如果可能遇到证书问题，给出提示
+                if (isLocalhost && isHTTPS) {
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.debug("NetworkManager", "检测到 localhost HTTPS，如果遇到 SSL 证书错误，建议使用 HTTP 或信任证书");
+                    }
+                }
+                
                 // 注册 Service Worker
                 // 注意：Service Worker 的作用域不能超过其所在目录
                 // Service Worker 文件在 /kernel/drive/ 目录下，所以作用域只能是 /kernel/drive/ 或子目录
-                // 如果需要全局拦截，建议：
-                // 1. 将 Service Worker 文件移到根目录（如 test/networkServiceWorker.js）
-                // 2. 或者使用降级模式（已自动实现，直接拦截 fetch API）
-                const swPath = '../kernel/drive/networkServiceWorker.js';
-                const registration = await navigator.serviceWorker.register(swPath, {
-                    scope: '../kernel/drive/'  // 作用域限制在 Service Worker 文件所在目录
+                // 使用绝对路径确保无论页面在哪个目录下都能正确找到 Service Worker
+                // 绝对路径：/kernel/drive/networkServiceWorker.js（从网站根目录开始）
+                const serviceWorkerPath = '/kernel/drive/networkServiceWorker.js';
+                const serviceWorkerScope = '/kernel/drive/';
+                
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.debug("NetworkManager", `注册 Service Worker: ${serviceWorkerPath}, 作用域: ${serviceWorkerScope}`);
+                }
+                
+                const registration = await navigator.serviceWorker.register(serviceWorkerPath, {
+                    scope: serviceWorkerScope  // 作用域限制在 Service Worker 文件所在目录
                 });
                 
                 this.serviceWorkerRegistration = registration;
@@ -154,11 +172,38 @@
                 }
                 
             } catch (error) {
-                if (typeof KernelLogger !== 'undefined') {
-                    KernelLogger.warn("NetworkManager", `Service Worker 注册失败: ${error.message}，将使用降级模式`, error);
-                } else {
-                    console.warn(`[内核][NetworkManager] Service Worker 注册失败: ${error.message}，将使用降级模式`, error);
+                // 详细错误处理
+                let errorMessage = error.message || String(error);
+                let suggestions = [];
+                
+                // 检查是否为 SSL 证书错误
+                if (errorMessage.includes('SSL') || 
+                    errorMessage.includes('certificate') || 
+                    errorMessage.includes('证书') ||
+                    errorMessage.includes('ERR_CERT')) {
+                    errorMessage = `SSL 证书错误: ${errorMessage}`;
+                    suggestions.push('【推荐】对于本地开发，使用 HTTP 而不是 HTTPS（localhost 的 HTTP 也完全支持 Service Worker）');
+                    suggestions.push('如果必须使用 HTTPS，请按以下步骤操作：');
+                    suggestions.push('  - Chrome/Edge: 访问页面时，点击地址栏的"不安全"警告，选择"继续访问"或"高级" -> "继续访问 localhost（不安全）"');
+                    suggestions.push('  - Firefox: 点击"高级" -> "接受风险并继续"');
+                    suggestions.push('  - 或者生成并安装受信任的自签名证书到系统证书存储');
+                    suggestions.push('注意：降级模式功能完整，不影响网络请求拦截功能');
                 }
+                
+                // 检查是否为路径错误
+                if (errorMessage.includes('Failed to register') || errorMessage.includes('404')) {
+                    suggestions.push('检查 Service Worker 文件路径是否正确');
+                    suggestions.push('确保 networkServiceWorker.js 文件存在于指定位置');
+                }
+                
+                const fullMessage = `Service Worker 注册失败: ${errorMessage}${suggestions.length > 0 ? '\n建议:\n' + suggestions.join('\n') : ''}，将使用降级模式`;
+                
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.warn("NetworkManager", fullMessage, error);
+                } else {
+                    console.warn(`[内核][NetworkManager] ${fullMessage}`, error);
+                }
+                
                 // 降级模式：不使用 Service Worker，但提供基本功能
                 this._initFallbackMode();
             }
@@ -167,6 +212,7 @@
         /**
          * 初始化降级模式（不使用 Service Worker）
          * 在降级模式下，通过拦截全局 fetch API 和 XMLHttpRequest 来实现网络请求监控
+         * 注意：降级模式功能完整，只是不使用 Service Worker 进行拦截
          */
         _initFallbackMode() {
             // 始终拦截 fetch API（无论是否使用 Service Worker）
@@ -176,9 +222,9 @@
             this._interceptXMLHttpRequest();
             
             if (typeof KernelLogger !== 'undefined') {
-                KernelLogger.info("NetworkManager", "已启用网络请求拦截（fetch 和 XMLHttpRequest）");
+                KernelLogger.info("NetworkManager", "已启用降级模式：网络请求拦截（fetch 和 XMLHttpRequest）。功能完整，无需 Service Worker。");
             } else {
-                console.log('[内核][NetworkManager] 已启用网络请求拦截（fetch 和 XMLHttpRequest）');
+                console.log('[内核][NetworkManager] 已启用降级模式：网络请求拦截（fetch 和 XMLHttpRequest）。功能完整，无需 Service Worker。');
             }
         }
         

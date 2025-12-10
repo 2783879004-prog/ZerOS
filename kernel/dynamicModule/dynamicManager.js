@@ -78,6 +78,58 @@ const DYNAMIC_MODULES = {
             dependencies: []
         }
     },
+
+    // pixi.js
+    "pixi.js": {
+        script: "../kernel/dynamicModule/libs/pixi.min.js",
+        metadata: {
+            name: "pixi.js",
+            version: "8.14.3",
+            description: "Pixi.js - 2D游戏引擎",
+            globalName: "PIXI",
+            autoLoad: false,
+            dependencies: []
+        }
+    },
+
+    // three.js
+    "three.js": {
+        script: "../kernel/dynamicModule/libs/threejs/three.core.min.js",
+        metadata: {
+            name: "three.js",
+            version: "0.172.0",
+            description: "Three.js - 3D游戏引擎",
+            globalName: "THREE",
+            autoLoad: false,
+            dependencies: []
+        }
+    },
+
+    // konva.js
+    "konva.js": {
+        script: "../kernel/dynamicModule/libs/konva.min.js",
+        metadata: {
+            name: "konva.js",
+            version: "10.0.12",
+            description: "Konva.js - canvas绘图引擎",
+            globalName: "Konva",
+            autoLoad: false,
+            dependencies: []
+        }
+    },
+
+    // howler.js - 音频播放库
+    "howler": {
+        script: "../kernel/dynamicModule/libs/howler/howler.min.js",
+        metadata: {
+            name: "howler",
+            version: "2.2.4",
+            description: "Howler.js - 现代Web音频库，支持多种音频格式",
+            globalName: "Howl",
+            autoLoad: false,
+            dependencies: []
+        }
+    },
     
     // 纯 CSS 模块示例
     // "bootstrap-css": {

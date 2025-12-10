@@ -5,7 +5,12 @@ KernelLogger.info("TaskbarManager", "模块初始化");
 
 class TaskbarManager {
     // 静态标志，防止重复显示选择器
-    static _showingSelector = false;
+    static _showingSelector = false
+    
+    // 最近使用程序的存储键名
+    static RECENT_PROGRAMS_KEY = 'taskbar_recent_programs'
+    // 最近使用程序的最大数量
+    static MAX_RECENT_PROGRAMS = 10;
     static _showingSelectorProgramName = null;
     // 更新定时器引用
     static _updateTimer = null;
@@ -19,6 +24,15 @@ class TaskbarManager {
     static _loadingPosition = false;
     // 电池事件是否已注册
     static _batteryEventRegistered = false;
+    // WIN键监听是否已注册
+    static _winKeyListenerRegistered = false;
+    // 全屏多任务选择器相关
+    static _taskSwitcherActive = false;
+    static _taskSwitcherContainer = null;
+    static _taskSwitcherItems = [];
+    static _selectedTaskIndex = -1;
+    static _ctrlMouseListenerRegistered = false;
+    static _ctrlMouseHandler = null;
     
     /**
      * 初始化任务栏
@@ -86,7 +100,91 @@ class TaskbarManager {
             TaskbarManager._observerInitialized = true;
         }
         
+        // 注册WIN键监听（只注册一次）
+        if (!TaskbarManager._winKeyListenerRegistered) {
+            TaskbarManager._registerWinKeyListener();
+            TaskbarManager._winKeyListenerRegistered = true;
+        }
+        
+        // 注册Ctrl+鼠标左键监听（全屏多任务选择器）
+        if (!TaskbarManager._ctrlMouseListenerRegistered) {
+            TaskbarManager._registerCtrlMouseListener();
+            TaskbarManager._ctrlMouseListenerRegistered = true;
+        }
+        
         KernelLogger.info("TaskbarManager", "任务栏初始化完成");
+    }
+    
+    /**
+     * 注册Ctrl键监听器（用于切换开始菜单）
+     * 使用Ctrl键而非WIN键，避免系统级快捷键可能渗透到浏览器外部
+     */
+    static _registerWinKeyListener() {
+        // 防止重复注册
+        if (TaskbarManager._winKeyListenerRegistered) {
+            return;
+        }
+        
+        // 用于跟踪Ctrl键是否被单独按下（不与其他键组合）
+        let ctrlKeyDownTime = 0;
+        let otherKeyPressed = false;
+        
+        document.addEventListener('keydown', (e) => {
+            // 检查是否按下了Ctrl键
+            if (e.key === 'Control' || e.key === 'Ctrl') {
+                // 确保没有同时按下其他修饰键（Alt、Shift、Meta）
+                if (e.altKey || e.shiftKey || e.metaKey) {
+                    return;
+                }
+                
+                // 检查是否在输入框中（如果是，则不处理）
+                const activeElement = document.activeElement;
+                if (activeElement && (
+                    activeElement.tagName === 'INPUT' ||
+                    activeElement.tagName === 'TEXTAREA' ||
+                    activeElement.isContentEditable
+                )) {
+                    return;
+                }
+                
+                // 记录Ctrl键按下时间
+                ctrlKeyDownTime = Date.now();
+                otherKeyPressed = false;
+                
+                // 阻止默认行为
+                e.preventDefault();
+                e.stopPropagation();
+                
+            } else if (e.ctrlKey && ctrlKeyDownTime > 0) {
+                // 如果Ctrl键已按下，但随后按下了其他键，则取消操作
+                otherKeyPressed = true;
+                ctrlKeyDownTime = 0;
+            }
+        }, { passive: false, capture: true });
+        
+        document.addEventListener('keyup', (e) => {
+            if (e.key === 'Control' || e.key === 'Ctrl') {
+                // 检查是否只按下了Ctrl键（没有其他键被按下）
+                if (ctrlKeyDownTime > 0 && !otherKeyPressed) {
+                    const pressDuration = Date.now() - ctrlKeyDownTime;
+                    // 如果按下时间在合理范围内（50-1000ms），则触发
+                    if (pressDuration >= 50 && pressDuration <= 1000) {
+                        // 切换开始菜单
+                        const launcherIcon = document.querySelector('.taskbar-app-launcher');
+                        if (launcherIcon) {
+                            TaskbarManager._toggleAppLauncher(launcherIcon);
+                        }
+                    }
+                }
+                
+                // 重置状态
+                ctrlKeyDownTime = 0;
+                otherKeyPressed = false;
+            }
+        }, { passive: true, capture: true });
+        
+        TaskbarManager._winKeyListenerRegistered = true;
+        KernelLogger.info("TaskbarManager", "Ctrl键监听已注册（用于切换开始菜单）");
     }
     
     /**
@@ -429,8 +527,9 @@ class TaskbarManager {
         const notificationButton = TaskbarManager._createNotificationButton();
         rightContainer.appendChild(notificationButton);
         
-        const powerButton = TaskbarManager._createPowerButton();
-        rightContainer.appendChild(powerButton);
+        // 电源选项已集成到开始菜单中，不再需要单独的电源按钮
+        // const powerButton = TaskbarManager._createPowerButton();
+        // rightContainer.appendChild(powerButton);
         
         taskbar.appendChild(rightContainer);
     }
@@ -500,8 +599,14 @@ class TaskbarManager {
                     element._hideTimeout = null;
                 }
                 
+                // 检查元素是否可见（通过 visible 类或计算样式）
+                const computedStyle = getComputedStyle(element);
+                const isVisible = element.classList.contains('visible') || 
+                                 computedStyle.display !== 'none' ||
+                                 (computedStyle.visibility !== 'hidden' && computedStyle.opacity !== '0');
+                
                 // 如果元素可见，立即隐藏
-                if (element.classList.contains('visible')) {
+                if (isVisible) {
                     // 立即停止动画
                     if (typeof AnimateManager !== 'undefined') {
                         AnimateManager.stopAnimation(element);
@@ -509,6 +614,10 @@ class TaskbarManager {
                     }
                     // 立即移除 visible 类
                     element.classList.remove('visible');
+                    // 立即隐藏元素（强制）
+                    element.style.display = 'none';
+                    element.style.opacity = '0';
+                    element.style.visibility = 'hidden';
                     // 调用关闭方法（用于清理事件监听器等）
                     if (hasParam) {
                         TaskbarManager[method](element, null, true); // 第三个参数表示立即关闭
@@ -542,13 +651,13 @@ class TaskbarManager {
     }
     
     /**
-     * 创建应用程序菜单
+     * 创建开始菜单，左右分栏布局）
      * @returns {HTMLElement} 菜单元素
      */
     static _createAppMenu() {
         const menu = document.createElement('div');
         menu.id = 'taskbar-app-menu';
-        menu.className = 'taskbar-app-menu';
+        menu.className = 'taskbar-start-menu-win10';
         
         // 应用主题背景色
         const themeManager = typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function' 
@@ -563,24 +672,168 @@ class TaskbarManager {
                     menu.style.borderColor = currentTheme.colors.border || (currentTheme.colors.primary ? currentTheme.colors.primary + '33' : 'rgba(108, 142, 255, 0.2)');
                 }
             } catch (e) {
-                KernelLogger.warn("TaskbarManager", `应用主题到应用程序菜单失败: ${e.message}`);
+                KernelLogger.warn("TaskbarManager", `应用主题到开始菜单失败: ${e.message}`);
             }
         }
         
-        // 创建菜单内容容器
+        // ========== 搜索栏区域 ==========
+        const searchBar = document.createElement('div');
+        searchBar.className = 'taskbar-start-menu-search';
+        searchBar.style.cssText = `
+            padding: 12px 16px;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+            flex-shrink: 0;
+        `;
+        
+        const searchInput = document.createElement('input');
+        searchInput.type = 'text';
+        searchInput.placeholder = '搜索程序...';
+        searchInput.className = 'taskbar-start-menu-search-input';
+        searchInput.style.cssText = `
+            width: 100%;
+            padding: 8px 12px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 6px;
+            color: rgba(215, 224, 221, 0.9);
+            font-size: 14px;
+            outline: none;
+            transition: all 0.2s;
+        `;
+        searchInput.addEventListener('input', (e) => {
+            TaskbarManager._handleSearchInput(e.target.value);
+        });
+        searchInput.addEventListener('focus', () => {
+            searchInput.style.background = 'rgba(255, 255, 255, 0.08)';
+            searchInput.style.borderColor = 'rgba(139, 92, 246, 0.5)';
+        });
+        searchInput.addEventListener('blur', () => {
+            searchInput.style.background = 'rgba(255, 255, 255, 0.05)';
+            searchInput.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+        });
+        searchBar.appendChild(searchInput);
+        
+        // 创建主容器（左右分栏）
+        const mainContainer = document.createElement('div');
+        mainContainer.className = 'taskbar-start-menu-main';
+        
+        // ========== 左侧：程序列表区域 ==========
+        const leftPanel = document.createElement('div');
+        leftPanel.className = 'taskbar-start-menu-left';
+        
+        // 左侧程序列表容器（可滚动）
+        const programListContainer = document.createElement('div');
+        programListContainer.className = 'taskbar-start-menu-program-list';
+        leftPanel.appendChild(programListContainer);
+        
+        mainContainer.appendChild(leftPanel);
+        
+        // ========== 右侧：动态磁贴区域 ==========
+        const rightPanel = document.createElement('div');
+        rightPanel.className = 'taskbar-start-menu-right';
+        
+        // 右侧标题
+        const rightTitle = document.createElement('div');
+        rightTitle.className = 'taskbar-start-menu-right-title';
+        rightTitle.textContent = '最近使用';
+        rightPanel.appendChild(rightTitle);
+        
+        // 右侧内容区域（最近使用的应用）
+        const rightContent = document.createElement('div');
+        rightContent.className = 'taskbar-start-menu-right-content';
+        rightPanel.appendChild(rightContent);
+        
+        mainContainer.appendChild(rightPanel);
+        
+        // ========== 底部：用户信息和电源选项 ==========
+        const bottomBar = document.createElement('div');
+        bottomBar.className = 'taskbar-start-menu-bottom';
+        
+        // 用户信息区域（左侧）
+        const userSection = document.createElement('div');
+        userSection.className = 'taskbar-start-menu-user';
+        
+        // 用户头像（使用默认图标）
+        const userAvatar = document.createElement('div');
+        userAvatar.className = 'taskbar-start-menu-user-avatar';
+        userAvatar.innerHTML = `
+            <svg width="32" height="32" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <circle cx="12" cy="8" r="4" fill="currentColor" opacity="0.8"/>
+                <path d="M6 21c0-3.314 2.686-6 6-6s6 2.686 6 6" stroke="currentColor" stroke-width="2" fill="none" opacity="0.8"/>
+            </svg>
+        `;
+        userSection.appendChild(userAvatar);
+        
+        // 用户名
+        const userName = document.createElement('div');
+        userName.className = 'taskbar-start-menu-user-name';
+        userName.textContent = '用户';
+        userSection.appendChild(userName);
+        
+        bottomBar.appendChild(userSection);
+        
+        // 电源选项区域（右侧）
+        const powerSection = document.createElement('div');
+        powerSection.className = 'taskbar-start-menu-power-section';
+        
+        // 电源按钮（Windows 10风格：单个按钮，点击展开菜单）
+        const powerButton = document.createElement('div');
+        powerButton.className = 'taskbar-start-menu-power-button';
+        powerButton.innerHTML = `
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8zm-1-13h2v6h-2V7z" fill="currentColor"/>
+            </svg>
+        `;
+        
+        // 电源菜单（悬停或点击时显示）
+        const powerMenu = document.createElement('div');
+        powerMenu.className = 'taskbar-start-menu-power-menu';
+        powerMenu.style.display = 'none';
+        
+        // 重启选项
+        const restartOption = TaskbarManager._createPowerOptionWin10('restart', '重启', () => {
+            TaskbarManager._restartSystem();
+        });
+        powerMenu.appendChild(restartOption);
+        
+        // 关机选项
+        const shutdownOption = TaskbarManager._createPowerOptionWin10('shutdown', '关机', () => {
+            TaskbarManager._shutdownSystem();
+        }, true); // 危险操作
+        powerMenu.appendChild(shutdownOption);
+        
+        powerSection.appendChild(powerButton);
+        powerSection.appendChild(powerMenu);
+        
+        // 电源按钮点击事件（只响应点击，不响应悬停）
+        powerButton.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isVisible = powerMenu.style.display !== 'none' && powerMenu.style.display !== '';
+            if (isVisible) {
+                powerMenu.style.display = 'none';
+                powerMenu.classList.remove('visible');
+            } else {
+                powerMenu.style.display = 'block';
+                powerMenu.classList.add('visible');
+            }
+        });
+        
+        // 点击外部区域关闭电源菜单
+        document.addEventListener('click', (e) => {
+            if (!powerSection.contains(e.target) && !powerMenu.contains(e.target)) {
+                powerMenu.style.display = 'none';
+                powerMenu.classList.remove('visible');
+            }
+        });
+        
+        bottomBar.appendChild(powerSection);
+        
+        // 组装菜单
         const menuContent = document.createElement('div');
-        menuContent.className = 'taskbar-app-menu-content';
-        
-        // 创建标题
-        const title = document.createElement('div');
-        title.className = 'taskbar-app-menu-title';
-        title.textContent = '所有应用程序';
-        menuContent.appendChild(title);
-        
-        // 创建程序列表容器（折叠式类别将直接渲染在这里）
-        const programList = document.createElement('div');
-        programList.className = 'taskbar-app-menu-list';
-        menuContent.appendChild(programList);
+        menuContent.className = 'taskbar-start-menu-content';
+        menuContent.appendChild(searchBar);
+        menuContent.appendChild(mainContainer);
+        menuContent.appendChild(bottomBar);
         
         menu.appendChild(menuContent);
         
@@ -633,13 +886,74 @@ class TaskbarManager {
     }
     
     /**
+     * 创建电源选项（Windows 10风格）
+     * @param {string} iconType 图标类型（'restart', 'shutdown'）
+     * @param {string} label 标签文本
+     * @param {Function} onClick 点击回调
+     * @param {boolean} isDanger 是否为危险操作
+     * @returns {HTMLElement} 选项元素
+     */
+    static _createPowerOptionWin10(iconType, label, onClick, isDanger = false) {
+        const option = document.createElement('div');
+        option.className = `taskbar-start-menu-power-menu-item${isDanger ? ' danger' : ''}`;
+        
+        // 创建图标容器
+        const iconContainer = document.createElement('div');
+        iconContainer.className = 'taskbar-start-menu-power-menu-icon';
+        
+        // 加载图标（异步）
+        TaskbarManager._loadSystemIcon(iconType, iconContainer).catch(e => {
+            KernelLogger.warn("TaskbarManager", `加载电源选项图标失败: ${e.message}`);
+        });
+        
+        option.appendChild(iconContainer);
+        
+        // 创建标签
+        const labelElement = document.createElement('div');
+        labelElement.className = 'taskbar-start-menu-power-menu-label';
+        labelElement.textContent = label;
+        option.appendChild(labelElement);
+        
+        // 添加点击事件
+        option.addEventListener('click', (e) => {
+            e.stopPropagation();
+            onClick();
+            // 点击后关闭菜单
+            const menu = document.getElementById('taskbar-app-menu');
+            if (menu) {
+                TaskbarManager._hideAppMenu(menu, null);
+            }
+        });
+        
+        return option;
+    }
+    
+    /**
+     * 创建电源选项（旧版，保留兼容性）
+     * @param {string} iconType 图标类型（'restart', 'shutdown'）
+     * @param {string} label 标签文本
+     * @param {Function} onClick 点击回调
+     * @param {boolean} isDanger 是否为危险操作
+     * @returns {HTMLElement} 选项元素
+     */
+    static _createPowerOption(iconType, label, onClick, isDanger = false) {
+        return TaskbarManager._createPowerOptionWin10(iconType, label, onClick, isDanger);
+    }
+    
+    /**
      * 显示应用程序菜单
      * @param {HTMLElement} menu 菜单元素
      * @param {HTMLElement} launcherIcon 启动器图标元素
      */
     static _showAppMenu(menu, launcherIcon) {
-        // 如果菜单正在关闭，不显示
-        if (menu && menu._isClosing) {
+        // 关闭通知栏（互斥显示）
+        if (typeof NotificationManager !== 'undefined' && typeof NotificationManager._hideNotificationContainer === 'function') {
+            NotificationManager._hideNotificationContainer();
+        }
+        
+        // 如果菜单正在关闭或被强制关闭，不显示
+        if (menu && (menu._isClosing || menu._forceClosed)) {
+            KernelLogger.debug("TaskbarManager", "开始菜单被强制关闭，阻止显示");
             return;
         }
         
@@ -649,9 +963,16 @@ class TaskbarManager {
             menu._hideTimeout = null;
         }
         
-        // 清除关闭标志
+        // 清除关闭标志（但保留强制关闭标志，直到多任务选择器关闭）
         if (menu) {
             menu._isClosing = false;
+            // 重置内联样式（确保之前强制隐藏的样式被清除）
+            menu.style.display = '';
+            menu.style.opacity = '';
+            menu.style.visibility = '';
+            menu.style.transform = '';
+            menu.style.pointerEvents = '';
+            menu.style.zIndex = '';
         }
         
         // 获取所有注册的程序
@@ -679,8 +1000,35 @@ class TaskbarManager {
             }
         }
         
-        // 渲染折叠式类别列表
-        TaskbarManager._renderCollapsibleCategories(menu, allPrograms, runningPrograms);
+        // 渲染程序列表（Windows 10风格：左侧程序列表）
+        const programListContainer = menu.querySelector('.taskbar-start-menu-program-list');
+        if (programListContainer) {
+            // 清空现有内容
+            programListContainer.innerHTML = '';
+            // 渲染Windows 10风格的程序列表
+            TaskbarManager._renderProgramListWin10(programListContainer, allPrograms, runningPrograms);
+        } else {
+            // 降级方案：使用旧的渲染方式
+            const fallbackList = menu.querySelector('.taskbar-start-menu-list') || menu.querySelector('.taskbar-app-menu-list');
+            if (fallbackList) {
+                fallbackList.innerHTML = '';
+                TaskbarManager._renderCollapsibleCategories(fallbackList, allPrograms, runningPrograms);
+            }
+        }
+        
+        // 渲染最近使用的应用（Windows 10风格：右侧磁贴区域）
+        const rightContent = menu.querySelector('.taskbar-start-menu-right-content');
+        if (rightContent) {
+            TaskbarManager._renderRecentApps(rightContent, allPrograms, runningPrograms);
+        }
+        
+        // 保存搜索输入框引用，供搜索功能使用
+        const searchInput = menu.querySelector('.taskbar-start-menu-search-input');
+        if (searchInput) {
+            menu._searchInput = searchInput;
+            menu._allPrograms = allPrograms;
+            menu._runningPrograms = runningPrograms;
+        }
         
         // 计算菜单位置（在启动器图标上方）
         if (launcherIcon) {
@@ -698,11 +1046,15 @@ class TaskbarManager {
             // 先显示菜单以获取实际尺寸
             menu.classList.add('visible');
             
+            // Windows 10风格菜单的默认尺寸
+            const win10MenuWidth = 400;
+            const win10MenuHeight = 600;
+            
             // 等待DOM更新后获取实际尺寸并调整位置
             setTimeout(() => {
                 const menuRect = menu.getBoundingClientRect();
-                const actualWidth = menuRect.width;
-                const actualHeight = menuRect.height;
+                const actualWidth = menuRect.width || win10MenuWidth;
+                const actualHeight = menuRect.height || win10MenuHeight;
                 
                 let menuLeft;
                 let menuTop;
@@ -903,8 +1255,15 @@ class TaskbarManager {
      * @param {Array} allPrograms 所有程序列表
      * @param {Set} runningPrograms 正在运行的程序集合
      */
-    static _renderCollapsibleCategories(menu, allPrograms, runningPrograms) {
-        const programList = menu.querySelector('.taskbar-app-menu-list');
+    static _renderCollapsibleCategories(container, allPrograms, runningPrograms) {
+        // container 可以是程序列表容器元素，也可以是菜单元素（向后兼容）
+        let programList = container;
+        
+        // 如果传入的是菜单元素，查找程序列表容器
+        if (container && container.classList && !container.classList.contains('taskbar-start-menu-list') && !container.classList.contains('taskbar-app-menu-list')) {
+            programList = container.querySelector('.taskbar-start-menu-list') || container.querySelector('.taskbar-app-menu-list');
+        }
+        
         if (!programList) return;
         
         programList.innerHTML = '';
@@ -1117,7 +1476,11 @@ class TaskbarManager {
         icon.className = 'taskbar-app-menu-item-icon';
         if (program.icon) {
             const img = document.createElement('img');
-            img.src = program.icon;
+            // 转换虚拟路径为实际 URL
+            const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(program.icon)
+                : program.icon;
+            img.src = iconUrl;
             img.alt = program.metadata?.description || program.name;
             icon.appendChild(img);
         } else {
@@ -1167,8 +1530,11 @@ class TaskbarManager {
                 TaskbarManager._hideAppMenu(menu, null);
             }
             
-            if (isRunning) {
-                // 如果正在运行，切换最小化/恢复状态
+            // 检查程序是否支持多开
+            const allowMultipleInstances = program.metadata && program.metadata.allowMultipleInstances === true;
+            
+            if (isRunning && !allowMultipleInstances) {
+                // 如果正在运行且不支持多开，切换最小化/恢复状态
                 const processTable = ProcessManager.PROCESS_TABLE;
                 for (const [pid, processInfo] of processTable) {
                     if (processInfo.programName === program.name && processInfo.status === 'running') {
@@ -1183,28 +1549,527 @@ class TaskbarManager {
                     }
                 }
             } else {
-                // 如果未运行，启动程序
+                // 如果未运行，或者支持多开（即使已运行也启动新实例），启动程序
                 ProcessManager.startProgram(program.name, {})
                     .then((pid) => {
                         KernelLogger.info("TaskbarManager", `程序 ${program.name} 已启动 (PID: ${pid})`);
+                        // 记录程序使用
+                        TaskbarManager._recordProgramUsage(program.name);
                         // 更新任务栏（确保新启动的程序图标显示）
                         TaskbarManager.update();
                         // 不刷新菜单，因为菜单已经在关闭过程中
                     })
                     .catch((error) => {
                         KernelLogger.error("TaskbarManager", `启动程序 ${program.name} 失败: ${error.message}`);
+                        // 如果是单例程序且已在运行，ProcessManager 会抛出错误，这里可以忽略或显示提示
+                        if (error.message && error.message.includes('already running') && !allowMultipleInstances) {
+                            // 单例程序已在运行，尝试聚焦窗口
+                            const processTable = ProcessManager.PROCESS_TABLE;
+                            for (const [pid, processInfo] of processTable) {
+                                if (processInfo.programName === program.name && processInfo.status === 'running') {
+                                    TaskbarManager._restoreProgram(pid);
+                                    break;
+                                }
+                            }
+                        }
                     });
             }
         });
         
-        // 右键菜单已由全局 ContextMenuManager 接管，这里不再处理
-        // 但保留事件阻止，避免显示默认右键菜单
+        // 右键菜单已由全局 ContextMenuManager 接管
+        // 确保事件能够正确传播，让 ContextMenuManager 处理
         item.addEventListener('contextmenu', (e) => {
-            // 让全局 ContextMenuManager 处理，这里只阻止默认行为
-            // 不需要额外处理，因为 ContextMenuManager 会检测到 app-menu-item 上下文
+            // 不阻止事件传播，让 ContextMenuManager 处理
+            // 只阻止默认的浏览器右键菜单
+            e.preventDefault();
         });
         
         return item;
+    }
+    
+    /**
+     * 渲染Windows 10风格的程序列表（按字母顺序或类别分组）
+     * @param {HTMLElement} container 容器元素
+     * @param {Array} allPrograms 所有程序列表
+     * @param {Set} runningPrograms 正在运行的程序集合
+     */
+    static _renderProgramListWin10(container, allPrograms, runningPrograms) {
+        if (!container) return;
+        
+        // 按字母顺序排序程序（使用程序名称，而不是描述）
+        const sortedPrograms = [...allPrograms].sort((a, b) => {
+            // 优先使用程序名称进行排序
+            const nameA = a.name.toLowerCase();
+            const nameB = b.name.toLowerCase();
+            return nameA.localeCompare(nameB, 'zh-CN', { numeric: true, sensitivity: 'base' });
+        });
+        
+        // 按首字母分组
+        const programsByLetter = {};
+        for (const program of sortedPrograms) {
+            // 使用程序名称的首字母进行分组
+            const programName = program.name;
+            const firstChar = programName.charAt(0);
+            const firstLetter = firstChar.toUpperCase();
+            
+            // 判断首字符类型
+            let letter;
+            if (/[A-Za-z]/.test(firstLetter)) {
+                // 英文字母
+                letter = firstLetter;
+            } else if (/[\u4e00-\u9fa5]/.test(firstChar)) {
+                // 中文字符，使用"#"
+                letter = '#';
+            } else if (/[0-9]/.test(firstChar)) {
+                // 数字，使用"#"
+                letter = '#';
+            } else {
+                // 其他字符，使用"#"
+                letter = '#';
+            }
+            
+            if (!programsByLetter[letter]) {
+                programsByLetter[letter] = [];
+            }
+            programsByLetter[letter].push(program);
+        }
+        
+        // 渲染每个字母分组（字母顺序：A-Z，然后#）
+        const letters = Object.keys(programsByLetter).sort((a, b) => {
+            if (a === '#') return 1;  // # 放在最后
+            if (b === '#') return -1;
+            return a.localeCompare(b);
+        });
+        
+        let itemIndex = 0;
+        for (const letter of letters) {
+            const programs = programsByLetter[letter];
+            const letterStartIndex = itemIndex;
+            
+            // 创建字母分组标题
+            const letterHeader = document.createElement('div');
+            letterHeader.className = 'taskbar-start-menu-letter-header';
+            letterHeader.textContent = letter;
+            letterHeader.style.opacity = '0';
+            letterHeader.style.transform = 'translateX(-20px)';
+            container.appendChild(letterHeader);
+            
+            // 为字母标题添加延迟动画（在程序项之前显示）
+            setTimeout(() => {
+                letterHeader.style.transition = 'opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
+                letterHeader.style.opacity = '1';
+                letterHeader.style.transform = 'translateX(0)';
+            }, letterStartIndex * 30);
+            
+            // 创建该字母下的程序列表（添加抽屉动画）
+            for (const program of programs) {
+                const isRunning = runningPrograms.has(program.name);
+                const programItem = TaskbarManager._createAppMenuItemWin10(program, isRunning);
+                programItem.style.opacity = '0';
+                programItem.style.transform = 'translateX(-30px)';
+                container.appendChild(programItem);
+                
+                // 为每个程序项添加延迟动画（抽屉效果）
+                setTimeout(() => {
+                    programItem.style.transition = 'opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1), transform 0.3s cubic-bezier(0.4, 0, 0.2, 1)';
+                    programItem.style.opacity = '1';
+                    programItem.style.transform = 'translateX(0)';
+                }, 50 + itemIndex * 30); // 50ms基础延迟 + 每个程序项延迟30ms
+                
+                itemIndex++;
+            }
+        }
+    }
+    
+    /**
+     * 创建Windows 10风格的应用程序菜单项
+     * @param {Object} program 程序信息
+     * @param {boolean} isRunning 是否正在运行
+     * @returns {HTMLElement} 菜单项元素
+     */
+    static _createAppMenuItemWin10(program, isRunning) {
+        const item = document.createElement('div');
+        // 同时添加新旧类名，确保 ContextMenuManager 能够识别
+        item.className = 'taskbar-start-menu-program-item taskbar-app-menu-item';
+        item.dataset.programName = program.name;
+        if (isRunning) {
+            item.classList.add('running');
+        }
+        
+        // 创建图标
+        const icon = document.createElement('div');
+        icon.className = 'taskbar-start-menu-program-icon';
+        if (program.icon) {
+            const img = document.createElement('img');
+            const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(program.icon)
+                : program.icon;
+            img.src = iconUrl;
+            img.alt = program.metadata?.description || program.name;
+            img.onerror = () => {
+                // 图标加载失败，使用文字图标
+                icon.innerHTML = `<div class="taskbar-start-menu-program-text-icon">${(program.metadata?.description || program.name).charAt(0).toUpperCase()}</div>`;
+            };
+            icon.appendChild(img);
+        } else {
+            const textIcon = document.createElement('div');
+            textIcon.className = 'taskbar-start-menu-program-text-icon';
+            textIcon.textContent = (program.metadata?.description || program.name).charAt(0).toUpperCase();
+            icon.appendChild(textIcon);
+        }
+        item.appendChild(icon);
+        
+        // 创建程序名称
+        const name = document.createElement('div');
+        name.className = 'taskbar-start-menu-program-name';
+        name.textContent = program.metadata?.description || program.name;
+        item.appendChild(name);
+        
+        // 点击事件：启动或切换程序
+        item.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            
+            // 立即获取菜单引用并标记为正在关闭
+            const menu = document.getElementById('taskbar-app-menu');
+            if (menu) {
+                menu._isClosing = true;
+                TaskbarManager._hideAppMenu(menu, null);
+            }
+            
+            // 检查程序是否支持多开
+            const allowMultipleInstances = program.metadata && program.metadata.allowMultipleInstances === true;
+            
+            if (isRunning && !allowMultipleInstances) {
+                // 如果正在运行且不支持多开，切换最小化/恢复状态
+                const processTable = ProcessManager.PROCESS_TABLE;
+                for (const [pid, processInfo] of processTable) {
+                    if (processInfo.programName === program.name && processInfo.status === 'running') {
+                        if (processInfo.isMinimized) {
+                            TaskbarManager._restoreProgram(pid);
+                        } else {
+                            TaskbarManager._minimizeProgram(pid);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                // 如果未运行，或者支持多开（即使已运行也启动新实例），启动程序
+                const allowMultipleInstances = program.metadata && program.metadata.allowMultipleInstances === true;
+                ProcessManager.startProgram(program.name, {})
+                    .then((pid) => {
+                        KernelLogger.info("TaskbarManager", `程序 ${program.name} 已启动 (PID: ${pid})`);
+                        // 记录程序使用
+                        TaskbarManager._recordProgramUsage(program.name);
+                        TaskbarManager.update();
+                    })
+                    .catch((error) => {
+                        KernelLogger.error("TaskbarManager", `启动程序 ${program.name} 失败: ${error.message}`);
+                        // 如果是单例程序且已在运行，ProcessManager 会抛出错误，这里可以忽略或显示提示
+                        if (error.message && error.message.includes('already running') && !allowMultipleInstances) {
+                            // 单例程序已在运行，尝试聚焦窗口
+                            const processTable = ProcessManager.PROCESS_TABLE;
+                            for (const [pid, processInfo] of processTable) {
+                                if (processInfo.programName === program.name && processInfo.status === 'running') {
+                                    TaskbarManager._restoreProgram(pid);
+                                    break;
+                                }
+                            }
+                        }
+                    });
+            }
+        });
+        
+        // 悬停效果
+        item.addEventListener('mouseenter', () => {
+            item.style.backgroundColor = 'rgba(255, 255, 255, 0.1)';
+        });
+        item.addEventListener('mouseleave', () => {
+            item.style.backgroundColor = '';
+        });
+        
+        return item;
+    }
+    
+    /**
+     * 记录程序使用（添加到最近使用列表）
+     * @param {string} programName 程序名称
+     */
+    static _recordProgramUsage(programName) {
+        try {
+            let recentPrograms = [];
+            const stored = localStorage.getItem(TaskbarManager.RECENT_PROGRAMS_KEY);
+            if (stored) {
+                try {
+                    recentPrograms = JSON.parse(stored);
+                } catch (e) {
+                    KernelLogger.warn("TaskbarManager", `解析最近使用程序列表失败: ${e.message}`);
+                }
+            }
+            
+            // 移除已存在的同名程序
+            recentPrograms = recentPrograms.filter(p => p.name !== programName);
+            
+            // 添加到开头
+            recentPrograms.unshift({
+                name: programName,
+                timestamp: Date.now()
+            });
+            
+            // 限制数量
+            recentPrograms = recentPrograms.slice(0, TaskbarManager.MAX_RECENT_PROGRAMS);
+            
+            // 保存到 localStorage
+            localStorage.setItem(TaskbarManager.RECENT_PROGRAMS_KEY, JSON.stringify(recentPrograms));
+        } catch (e) {
+            KernelLogger.warn("TaskbarManager", `记录程序使用失败: ${e.message}`);
+        }
+    }
+    
+    /**
+     * 获取最近使用的程序列表
+     * @returns {Array} 最近使用的程序列表 [{ name, timestamp }]
+     */
+    static _getRecentPrograms() {
+        try {
+            const stored = localStorage.getItem(TaskbarManager.RECENT_PROGRAMS_KEY);
+            if (stored) {
+                return JSON.parse(stored);
+            }
+        } catch (e) {
+            KernelLogger.warn("TaskbarManager", `获取最近使用程序列表失败: ${e.message}`);
+        }
+        return [];
+    }
+    
+    /**
+     * 处理搜索输入
+     * @param {string} searchText 搜索文本
+     */
+    static _handleSearchInput(searchText) {
+        const menu = document.getElementById('taskbar-app-menu');
+        if (!menu) return;
+        
+        const allPrograms = menu._allPrograms || [];
+        const runningPrograms = menu._runningPrograms || new Set();
+        const programListContainer = menu.querySelector('.taskbar-start-menu-program-list');
+        
+        if (!programListContainer) return;
+        
+        if (!searchText || searchText.trim() === '') {
+            // 清空搜索，恢复原始列表
+            programListContainer.innerHTML = '';
+            TaskbarManager._renderProgramListWin10(programListContainer, allPrograms, runningPrograms);
+            return;
+        }
+        
+        // 搜索程序（根据程序名称和描述）
+        const searchLower = searchText.toLowerCase().trim();
+        const filteredPrograms = allPrograms.filter(program => {
+            const name = program.name.toLowerCase();
+            const description = (program.metadata?.description || '').toLowerCase();
+            return name.includes(searchLower) || description.includes(searchLower);
+        });
+        
+        // 清空并渲染搜索结果
+        programListContainer.innerHTML = '';
+        if (filteredPrograms.length === 0) {
+            const noResults = document.createElement('div');
+            noResults.style.cssText = `
+                padding: 40px 20px;
+                text-align: center;
+                color: rgba(255, 255, 255, 0.6);
+                font-size: 14px;
+            `;
+            noResults.textContent = `未找到匹配的程序: "${searchText}"`;
+            programListContainer.appendChild(noResults);
+        } else {
+            TaskbarManager._renderProgramListWin10(programListContainer, filteredPrograms, runningPrograms);
+        }
+    }
+    
+    /**
+     * 渲染最近使用的应用（Windows 10风格：右侧磁贴区域）
+     * @param {HTMLElement} container 容器元素
+     * @param {Array} allPrograms 所有程序列表
+     * @param {Set} runningPrograms 正在运行的程序集合
+     */
+    static _renderRecentApps(container, allPrograms, runningPrograms) {
+        if (!container) return;
+        
+        // 获取最近使用的程序记录
+        const recentRecords = TaskbarManager._getRecentPrograms();
+        
+        // 创建程序名称到程序对象的映射
+        const programMap = new Map();
+        for (const program of allPrograms) {
+            programMap.set(program.name, program);
+        }
+        
+        // 根据最近使用记录获取程序对象
+        const recentPrograms = [];
+        for (const record of recentRecords) {
+            const program = programMap.get(record.name);
+            if (program) {
+                recentPrograms.push(program);
+            }
+        }
+        
+        // 如果最近使用的程序少于6个，优先添加正在运行的程序
+        if (recentPrograms.length < 6) {
+            for (const program of allPrograms) {
+                if (runningPrograms.has(program.name) && !recentPrograms.find(p => p.name === program.name)) {
+                    recentPrograms.push(program);
+                    if (recentPrograms.length >= 6) break;
+                }
+            }
+        }
+        
+        // 如果还是少于6个，添加其他程序
+        if (recentPrograms.length < 6) {
+            for (const program of allPrograms) {
+                if (!recentPrograms.find(p => p.name === program.name)) {
+                    recentPrograms.push(program);
+                    if (recentPrograms.length >= 6) break;
+                }
+            }
+        }
+        
+        if (recentPrograms.length === 0) {
+            container.innerHTML = `
+                <div style="text-align: center; padding: 40px 20px; color: rgba(255, 255, 255, 0.6); font-size: 14px;">
+                    暂无最近使用的应用
+                </div>
+            `;
+            return;
+        }
+        
+        // 创建磁贴网格（使用CSS中定义的3列布局，不覆盖样式）
+        container.innerHTML = '';
+        // 不设置 display 和 gridTemplateColumns，使用 CSS 中定义的样式
+        // container.style.display = 'grid';  // 已在 CSS 中定义
+        // container.style.gridTemplateColumns = 'repeat(3, 1fr)';  // 已在 CSS 中定义
+        // container.style.gap = '14px';  // 已在 CSS 中定义
+        // container.style.padding = '20px';  // 已在 CSS 中定义
+        
+        // 渲染每个磁贴（添加渐显动画）
+        let tileIndex = 0;
+        for (const program of recentPrograms.slice(0, 6)) {
+            const tile = TaskbarManager._createAppTileWin10(program, runningPrograms.has(program.name));
+            tile.style.opacity = '0';
+            tile.style.transform = 'scale(0.8)';
+            container.appendChild(tile);
+            
+            // 为每个磁贴添加延迟渐显动画
+            setTimeout(() => {
+                tile.style.transition = 'opacity 0.4s cubic-bezier(0.4, 0, 0.2, 1), transform 0.4s cubic-bezier(0.4, 0, 0.2, 1)';
+                tile.style.opacity = '1';
+                tile.style.transform = 'scale(1)';
+            }, 200 + tileIndex * 80); // 200ms基础延迟 + 每个磁贴80ms间隔
+            
+            tileIndex++;
+        }
+    }
+    
+    /**
+     * 创建Windows 10风格的应用程序磁贴
+     * @param {Object} program 程序信息
+     * @param {boolean} isRunning 是否正在运行
+     * @returns {HTMLElement} 磁贴元素
+     */
+    static _createAppTileWin10(program, isRunning) {
+        const tile = document.createElement('div');
+        // 同时添加 app-menu-item 类名，确保 ContextMenuManager 能够识别
+        tile.className = 'taskbar-start-menu-tile taskbar-app-menu-item';
+        tile.dataset.programName = program.name;
+        if (isRunning) {
+            tile.classList.add('running');
+        }
+        
+        // 创建磁贴图标
+        const icon = document.createElement('div');
+        icon.className = 'taskbar-start-menu-tile-icon';
+        if (program.icon) {
+            const img = document.createElement('img');
+            const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(program.icon)
+                : program.icon;
+            img.src = iconUrl;
+            img.alt = program.metadata?.description || program.name;
+            img.onerror = () => {
+                icon.innerHTML = `<div class="taskbar-start-menu-tile-text-icon">${(program.metadata?.description || program.name).charAt(0).toUpperCase()}</div>`;
+            };
+            icon.appendChild(img);
+        } else {
+            const textIcon = document.createElement('div');
+            textIcon.className = 'taskbar-start-menu-tile-text-icon';
+            textIcon.textContent = (program.metadata?.description || program.name).charAt(0).toUpperCase();
+            icon.appendChild(textIcon);
+        }
+        tile.appendChild(icon);
+        
+        // 创建程序名称
+        const name = document.createElement('div');
+        name.className = 'taskbar-start-menu-tile-name';
+        name.textContent = program.metadata?.description || program.name;
+        tile.appendChild(name);
+        
+        // 点击事件
+        tile.addEventListener('click', (e) => {
+            e.stopPropagation();
+            e.preventDefault();
+            
+            const menu = document.getElementById('taskbar-app-menu');
+            if (menu) {
+                menu._isClosing = true;
+                TaskbarManager._hideAppMenu(menu, null);
+            }
+            
+            if (isRunning) {
+                const processTable = ProcessManager.PROCESS_TABLE;
+                for (const [pid, processInfo] of processTable) {
+                    if (processInfo.programName === program.name && processInfo.status === 'running') {
+                        if (processInfo.isMinimized) {
+                            TaskbarManager._restoreProgram(pid);
+                        } else {
+                            TaskbarManager._minimizeProgram(pid);
+                        }
+                        break;
+                    }
+                }
+            } else {
+                const allowMultipleInstances = program.metadata && program.metadata.allowMultipleInstances === true;
+                ProcessManager.startProgram(program.name, {})
+                    .then((pid) => {
+                        KernelLogger.info("TaskbarManager", `程序 ${program.name} 已启动 (PID: ${pid})`);
+                        // 记录程序使用
+                        TaskbarManager._recordProgramUsage(program.name);
+                        TaskbarManager.update();
+                    })
+                    .catch((error) => {
+                        KernelLogger.error("TaskbarManager", `启动程序 ${program.name} 失败: ${error.message}`);
+                        if (error.message && error.message.includes('already running') && !allowMultipleInstances) {
+                            const processTable = ProcessManager.PROCESS_TABLE;
+                            for (const [pid, processInfo] of processTable) {
+                                if (processInfo.programName === program.name && processInfo.status === 'running') {
+                                    TaskbarManager._restoreProgram(pid);
+                                    break;
+                                }
+                            }
+                        }
+                    });
+            }
+        });
+        
+        // 右键菜单已由全局 ContextMenuManager 接管
+        // 确保事件能够正确传播，让 ContextMenuManager 处理
+        tile.addEventListener('contextmenu', (e) => {
+            // 不阻止事件传播，让 ContextMenuManager 处理
+            // 只阻止默认的浏览器右键菜单
+            e.preventDefault();
+        });
+        
+        return tile;
     }
     
     /**
@@ -1341,7 +2206,11 @@ class TaskbarManager {
             icon.className = 'taskbar-icon-image';
             iconContainer.appendChild(icon);
         } else if (programData.icon) {
-            icon.src = programData.icon;
+            // 转换虚拟路径为实际 URL
+            const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(programData.icon)
+                : programData.icon;
+            icon.src = iconUrl;
             icon.alt = programData.metadata.description || programName;
             icon.className = 'taskbar-icon-image';
             iconContainer.appendChild(icon);
@@ -1350,7 +2219,11 @@ class TaskbarManager {
             if (typeof ApplicationAssetManager !== 'undefined' && typeof ApplicationAssetManager.getIcon === 'function') {
                 const programIcon = ApplicationAssetManager.getIcon(programName);
                 if (programIcon) {
-                    icon.src = programIcon;
+                    // 转换虚拟路径为实际 URL
+                    const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                        ? ProcessManager.convertVirtualPathToUrl(programIcon)
+                        : programIcon;
+                    icon.src = iconUrl;
                     icon.alt = programData.metadata.description || programName;
                     icon.className = 'taskbar-icon-image';
                     iconContainer.appendChild(icon);
@@ -2341,7 +3214,11 @@ class TaskbarManager {
                     fallbackIcon.className = 'taskbar-instance-selector-item-icon';
                     if (programData.icon) {
                         const img = document.createElement('img');
-                        img.src = programData.icon;
+                        // 转换虚拟路径为实际 URL
+                        const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                            ? ProcessManager.convertVirtualPathToUrl(programData.icon)
+                            : programData.icon;
+                        img.src = iconUrl;
                         img.alt = programName;
                         fallbackIcon.appendChild(img);
                     } else {
@@ -2355,7 +3232,11 @@ class TaskbarManager {
                 itemIcon.className = 'taskbar-instance-selector-item-icon';
                 if (programData.icon) {
                     const img = document.createElement('img');
-                    img.src = programData.icon;
+                    // 转换虚拟路径为实际 URL
+                    const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                        ? ProcessManager.convertVirtualPathToUrl(programData.icon)
+                        : programData.icon;
+                    img.src = iconUrl;
                     img.alt = programName;
                     itemIcon.appendChild(img);
                 } else {
@@ -2975,11 +3856,21 @@ class TaskbarManager {
     static _showTimeWheel(wheel, timeContainer) {
         if (!wheel || !timeContainer) return;
         
+        // 关闭通知栏（互斥显示）
+        if (typeof NotificationManager !== 'undefined' && typeof NotificationManager._hideNotificationContainer === 'function') {
+            NotificationManager._hideNotificationContainer();
+        }
+        
         // 清除之前的隐藏定时器（如果存在）
         if (wheel._hideTimeout) {
             clearTimeout(wheel._hideTimeout);
             wheel._hideTimeout = null;
         }
+        
+        // 重置内联样式（确保之前强制隐藏的样式被清除）
+        wheel.style.display = '';
+        wheel.style.opacity = '';
+        wheel.style.visibility = '';
         
         // 获取任务栏位置
         const position = TaskbarManager._taskbarPosition || 'bottom';
@@ -3957,11 +4848,21 @@ class TaskbarManager {
     static _showBatteryPanel(panel, batteryContainer) {
         if (!panel || !batteryContainer) return;
         
+        // 关闭通知栏（互斥显示）
+        if (typeof NotificationManager !== 'undefined' && typeof NotificationManager._hideNotificationContainer === 'function') {
+            NotificationManager._hideNotificationContainer();
+        }
+        
         // 清除之前的隐藏定时器（如果存在）
         if (panel._hideTimeout) {
             clearTimeout(panel._hideTimeout);
             panel._hideTimeout = null;
         }
+        
+        // 重置内联样式（确保之前强制隐藏的样式被清除）
+        panel.style.display = '';
+        panel.style.opacity = '';
+        panel.style.visibility = '';
         
         // 获取任务栏位置
         const position = TaskbarManager._taskbarPosition || 'bottom';
@@ -4813,11 +5714,21 @@ class TaskbarManager {
     static _showNetworkPanel(panel, networkContainer) {
         if (!panel || !networkContainer) return;
         
+        // 关闭通知栏（互斥显示）
+        if (typeof NotificationManager !== 'undefined' && typeof NotificationManager._hideNotificationContainer === 'function') {
+            NotificationManager._hideNotificationContainer();
+        }
+        
         // 清除之前的隐藏定时器（如果存在）
         if (panel._hideTimeout) {
             clearTimeout(panel._hideTimeout);
             panel._hideTimeout = null;
         }
+        
+        // 重置内联样式（确保之前强制隐藏的样式被清除）
+        panel.style.display = '';
+        panel.style.opacity = '';
+        panel.style.visibility = '';
         
         // 获取任务栏位置
         const position = TaskbarManager._taskbarPosition || 'bottom';
@@ -5488,11 +6399,21 @@ class TaskbarManager {
     static _showPowerMenu(menu, powerButton) {
         if (!menu || !powerButton) return;
         
+        // 关闭通知栏（互斥显示）
+        if (typeof NotificationManager !== 'undefined' && typeof NotificationManager._hideNotificationContainer === 'function') {
+            NotificationManager._hideNotificationContainer();
+        }
+        
         // 清除之前的隐藏定时器（如果存在）
         if (menu._hideTimeout) {
             clearTimeout(menu._hideTimeout);
             menu._hideTimeout = null;
         }
+        
+        // 重置内联样式（确保之前强制隐藏的样式被清除）
+        menu.style.display = '';
+        menu.style.opacity = '';
+        menu.style.visibility = '';
         
         // 先隐藏其他菜单
         const appMenu = document.getElementById('taskbar-app-menu');
@@ -6017,7 +6938,11 @@ class TaskbarManager {
         if (iconPath) {
             // 如果有图标路径，使用图标
             const iconImg = document.createElement('img');
-            iconImg.src = iconPath;
+            // 转换虚拟路径为实际 URL
+            const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(iconPath)
+                : iconPath;
+            iconImg.src = iconUrl;
             iconImg.alt = programName || '程序图标';
             iconImg.style.cssText = `
                 width: 100%;
@@ -7506,6 +8431,556 @@ class TaskbarManager {
                 KernelLogger.warn("TaskbarManager", `更新关闭图标失败: ${e.message}`);
             }
         }
+    }
+    
+    /**
+     * 注册Ctrl+鼠标左键监听器（全屏多任务选择器）
+     */
+    static _registerCtrlMouseListener() {
+        KernelLogger.info("TaskbarManager", "注册Ctrl+鼠标左键监听器（全屏多任务选择器）");
+        
+        // 监听鼠标左键点击（当Ctrl键按下时）
+        // 直接使用事件对象的 ctrlKey 属性，更可靠
+        // 使用捕获阶段并设置更高的优先级（在EventManager之前处理）
+        const mouseHandler = (e) => {
+            // 检查是否是 Ctrl + 鼠标左键
+            if (e.ctrlKey && e.button === 0 && !TaskbarManager._taskSwitcherActive) {
+                KernelLogger.debug("TaskbarManager", `检测到Ctrl+鼠标左键，目标: ${e.target?.tagName || 'unknown'}`);
+                
+                // 检查是否在输入框中
+                const activeElement = document.activeElement;
+                if (activeElement && (
+                    activeElement.tagName === 'INPUT' ||
+                    activeElement.tagName === 'TEXTAREA' ||
+                    activeElement.isContentEditable
+                )) {
+                    KernelLogger.debug("TaskbarManager", "在输入框中，忽略");
+                    return;
+                }
+                
+                // 检查是否点击在窗口标题栏等特殊区域（避免与窗口拖动冲突）
+                const target = e.target;
+                if (target && (
+                    target.closest('.zos-window-title-bar') ||
+                    target.closest('.zos-window-controls') ||
+                    target.closest('.taskbar') ||
+                    target.closest('#task-switcher-container')
+                )) {
+                    KernelLogger.debug("TaskbarManager", "点击在特殊区域，忽略");
+                    return;
+                }
+                
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation(); // 阻止其他监听器处理
+                
+                KernelLogger.info("TaskbarManager", "触发全屏多任务选择器");
+                TaskbarManager._showTaskSwitcher();
+            }
+        };
+        
+        // 使用捕获阶段，确保在其他监听器之前处理
+        // 使用 addEventListener 的第三个参数 { capture: true } 确保在捕获阶段处理
+        document.addEventListener('mousedown', mouseHandler, { 
+            passive: false, 
+            capture: true 
+        });
+        
+        // 保存处理器引用以便调试
+        TaskbarManager._ctrlMouseHandler = mouseHandler;
+        
+        KernelLogger.info("TaskbarManager", "Ctrl+鼠标左键监听器注册完成");
+    }
+    
+    /**
+     * 显示全屏多任务选择器
+     */
+    static _showTaskSwitcher() {
+        if (TaskbarManager._taskSwitcherActive) {
+            KernelLogger.debug("TaskbarManager", "多任务选择器已激活，忽略重复调用");
+            return;
+        }
+        
+        // 先检查是否有有效窗口，如果没有窗口，直接返回，不执行关闭操作
+        let allWindows = typeof GUIManager !== 'undefined' ? GUIManager.getAllWindows() : [];
+        
+        // 过滤无效窗口：只保留仍在DOM中且进程仍在运行的窗口
+        const validWindows = allWindows.filter(windowInfo => {
+            // 检查窗口元素是否有效且仍在DOM中
+            if (!windowInfo.window || !windowInfo.window.parentElement || !document.body.contains(windowInfo.window)) {
+                KernelLogger.debug("TaskbarManager", `窗口 ${windowInfo.windowId} 已从DOM中移除，跳过`);
+                return false;
+            }
+            
+            // 检查进程是否仍在运行
+            if (typeof ProcessManager !== 'undefined' && windowInfo.pid) {
+                const processInfo = ProcessManager.getProcessInfo(windowInfo.pid);
+                if (!processInfo || processInfo.status !== 'running') {
+                    KernelLogger.debug("TaskbarManager", `窗口 ${windowInfo.windowId} 的进程 ${windowInfo.pid} 已退出，跳过`);
+                    return false;
+                }
+            }
+            
+            return true;
+        });
+        
+        KernelLogger.debug("TaskbarManager", `显示多任务选择器，找到 ${allWindows.length} 个窗口，其中 ${validWindows.length} 个有效`);
+        
+        // 如果没有有效窗口，直接返回，不执行任何关闭操作
+        if (validWindows.length === 0) {
+            KernelLogger.warn("TaskbarManager", "没有运行中的窗口，无法显示多任务选择器");
+            return;
+        }
+        
+        // 有窗口时才执行关闭操作
+        // 强制关闭开始菜单和其他任务栏弹窗
+        TaskbarManager._closeAllTaskbarPopups();
+        
+        // 额外确保开始菜单被关闭（直接检查并关闭，使用更强制的方式）
+        const appMenu = document.getElementById('taskbar-app-menu');
+        if (appMenu) {
+            KernelLogger.debug("TaskbarManager", "检测到开始菜单，强制关闭（多任务选择器打开）");
+            
+            // 设置关闭标志，防止被重新打开
+            appMenu._isClosing = true;
+            appMenu._forceClosed = true; // 添加强制关闭标志
+            
+            // 立即停止动画并清理
+            if (typeof AnimateManager !== 'undefined') {
+                AnimateManager.stopAnimation(appMenu);
+                AnimateManager.removeAnimationClasses(appMenu);
+            }
+            
+            // 清除隐藏定时器
+            if (appMenu._hideTimeout) {
+                clearTimeout(appMenu._hideTimeout);
+                appMenu._hideTimeout = null;
+            }
+            
+            // 强制移除所有可能显示菜单的类和样式
+            appMenu.classList.remove('visible');
+            appMenu.classList.remove('show');
+            appMenu.classList.remove('expanded');
+            
+            // 强制设置隐藏样式（使用 !important 级别的内联样式）
+            appMenu.style.setProperty('display', 'none', 'important');
+            appMenu.style.setProperty('opacity', '0', 'important');
+            appMenu.style.setProperty('visibility', 'hidden', 'important');
+            appMenu.style.setProperty('transform', 'scale(0.95) translateY(-10px)', 'important');
+            appMenu.style.setProperty('pointer-events', 'none', 'important');
+            appMenu.style.setProperty('z-index', '-1', 'important');
+            
+            // 清理可能残留的样式属性
+            appMenu.style.transform = '';
+            appMenu.style.scale = '';
+            appMenu.style.translateX = '';
+            appMenu.style.translateY = '';
+            
+            // 调用关闭方法（用于清理事件监听器等）
+            TaskbarManager._hideAppMenu(appMenu, null, true);
+            
+            KernelLogger.debug("TaskbarManager", "开始菜单已强制关闭");
+        }
+        
+        TaskbarManager._taskSwitcherActive = true;
+        
+        // 创建全屏容器
+        const container = document.createElement('div');
+        container.id = 'task-switcher-container';
+        container.className = 'task-switcher-container';
+        container.style.cssText = `
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            background: rgba(0, 0, 0, 0.85);
+            backdrop-filter: blur(20px);
+            z-index: 99999;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            gap: 20px;
+            padding: 40px;
+            box-sizing: border-box;
+            animation: taskSwitcherFadeIn 0.3s ease-out;
+        `;
+        
+        // 创建标题
+        const title = document.createElement('div');
+        title.className = 'task-switcher-title';
+        title.textContent = '选择任务';
+        title.style.cssText = `
+            font-size: 24px;
+            font-weight: 600;
+            color: rgba(255, 255, 255, 0.9);
+            margin-bottom: 20px;
+        `;
+        container.appendChild(title);
+        
+        // 创建任务列表容器
+        const tasksContainer = document.createElement('div');
+        tasksContainer.className = 'task-switcher-tasks';
+        tasksContainer.style.cssText = `
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+            gap: 20px;
+            width: 100%;
+            max-width: 1200px;
+            max-height: calc(100vh - 200px);
+            overflow-y: auto;
+            padding: 20px;
+            box-sizing: border-box;
+        `;
+        
+        // 创建任务项（只使用有效窗口）
+        TaskbarManager._taskSwitcherItems = [];
+        validWindows.forEach((windowInfo, index) => {
+            const taskItem = TaskbarManager._createTaskSwitcherItem(windowInfo, index);
+            tasksContainer.appendChild(taskItem);
+            TaskbarManager._taskSwitcherItems.push(taskItem);
+        });
+        
+        container.appendChild(tasksContainer);
+        
+        // 创建提示文本
+        const hint = document.createElement('div');
+        hint.className = 'task-switcher-hint';
+        hint.textContent = '使用鼠标滚轮选择，左键确认，ESC退出';
+        hint.style.cssText = `
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.6);
+            margin-top: 20px;
+        `;
+        container.appendChild(hint);
+        
+        document.body.appendChild(container);
+        TaskbarManager._taskSwitcherContainer = container;
+        
+        // 初始化选中索引
+        TaskbarManager._selectedTaskIndex = 0;
+        if (TaskbarManager._taskSwitcherItems.length > 0) {
+            TaskbarManager._taskSwitcherItems[0].classList.add('selected');
+        }
+        
+        // 监听滚轮事件（优化流畅度，降低灵敏度）
+        let lastWheelTime = 0;
+        let wheelDeltaAccumulator = 0; // 累积滚轮增量
+        const WHEEL_THROTTLE_MS = 32; // 降低灵敏度：从16ms增加到32ms（降低一半）
+        const WHEEL_DELTA_THRESHOLD = 50; // 需要累积的滚轮增量阈值（降低灵敏度）
+        
+        const wheelHandler = (e) => {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            if (TaskbarManager._taskSwitcherItems.length === 0) {
+                return;
+            }
+            
+            const now = Date.now();
+            const timeSinceLastWheel = now - lastWheelTime;
+            
+            // 累积滚轮增量（降低灵敏度）
+            wheelDeltaAccumulator += Math.abs(e.deltaY);
+            
+            // 节流处理，确保流畅度
+            if (timeSinceLastWheel < WHEEL_THROTTLE_MS) {
+                return;
+            }
+            
+            // 只有当累积的增量超过阈值时才切换选择（降低灵敏度）
+            if (wheelDeltaAccumulator < WHEEL_DELTA_THRESHOLD) {
+                return;
+            }
+            
+            lastWheelTime = now;
+            wheelDeltaAccumulator = 0; // 重置累积器
+            
+            // 使用 requestAnimationFrame 确保动画流畅
+            if (container._wheelTimeout) {
+                cancelAnimationFrame(container._wheelTimeout);
+            }
+            
+            container._wheelTimeout = requestAnimationFrame(() => {
+                // 移除当前选中状态
+                TaskbarManager._taskSwitcherItems[TaskbarManager._selectedTaskIndex]?.classList.remove('selected');
+                
+                // 计算滚动方向
+                const scrollDirection = e.deltaY > 0 ? 1 : -1;
+                
+                // 计算新的选中索引
+                if (scrollDirection > 0) {
+                    // 向下滚动
+                    TaskbarManager._selectedTaskIndex = (TaskbarManager._selectedTaskIndex + 1) % TaskbarManager._taskSwitcherItems.length;
+                } else {
+                    // 向上滚动
+                    TaskbarManager._selectedTaskIndex = (TaskbarManager._selectedTaskIndex - 1 + TaskbarManager._taskSwitcherItems.length) % TaskbarManager._taskSwitcherItems.length;
+                }
+                
+                // 添加新的选中状态
+                const selectedItem = TaskbarManager._taskSwitcherItems[TaskbarManager._selectedTaskIndex];
+                if (selectedItem) {
+                    selectedItem.classList.add('selected');
+                    
+                    // 使用更平滑的滚动方式
+                    selectedItem.scrollIntoView({
+                        behavior: 'smooth',
+                        block: 'nearest',
+                        inline: 'nearest'
+                    });
+                }
+                
+                container._wheelTimeout = null;
+            });
+        };
+        
+        container.addEventListener('wheel', wheelHandler, { passive: false });
+        
+        // 保存处理器引用以便清理
+        container._wheelHandler = wheelHandler;
+        
+        // 监听鼠标左键点击（确认选择）
+        const clickHandler = (e) => {
+            if (e.button === 0 && TaskbarManager._selectedTaskIndex >= 0) {
+                e.preventDefault();
+                e.stopPropagation();
+                TaskbarManager._confirmTaskSelection();
+            }
+        };
+        
+        container.addEventListener('mousedown', clickHandler, { passive: false });
+        
+        // 监听ESC键退出
+        const escHandler = (e) => {
+            if (e.key === 'Escape' || e.key === 'Esc') {
+                e.preventDefault();
+                e.stopPropagation();
+                TaskbarManager._hideTaskSwitcher();
+            }
+        };
+        
+        document.addEventListener('keydown', escHandler, { passive: false, capture: true });
+        
+        // 保存事件处理器引用，以便后续清理
+        container._wheelHandler = wheelHandler;
+        container._clickHandler = clickHandler;
+        container._escHandler = escHandler;
+    }
+    
+    /**
+     * 创建任务选择器项
+     */
+    static _createTaskSwitcherItem(windowInfo, index) {
+        const item = document.createElement('div');
+        item.className = 'task-switcher-item';
+        item.dataset.windowId = windowInfo.windowId;
+        item.dataset.index = index;
+        
+        // 获取程序图标
+        let iconUrl = windowInfo.icon || '';
+        if (!iconUrl && typeof ApplicationAssetManager !== 'undefined') {
+            const processInfo = typeof ProcessManager !== 'undefined' ? ProcessManager.getProcessInfo(windowInfo.pid) : null;
+            if (processInfo && processInfo.programName) {
+                const virtualIconPath = ApplicationAssetManager.getIcon(processInfo.programName) || '';
+                // 转换虚拟路径为实际 URL
+                iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                    ? ProcessManager.convertVirtualPathToUrl(virtualIconPath)
+                    : virtualIconPath;
+            }
+        } else if (iconUrl) {
+            // 如果 windowInfo.icon 存在，也需要转换
+            iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(iconUrl)
+                : iconUrl;
+        }
+        
+        // 创建图标
+        const icon = document.createElement('div');
+        icon.className = 'task-switcher-item-icon';
+        if (iconUrl) {
+            icon.style.cssText = `
+                width: 64px;
+                height: 64px;
+                background-image: url(${iconUrl});
+                background-size: contain;
+                background-repeat: no-repeat;
+                background-position: center;
+                margin-bottom: 12px;
+            `;
+        } else {
+            icon.style.cssText = `
+                width: 64px;
+                height: 64px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 12px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                font-size: 32px;
+                margin-bottom: 12px;
+            `;
+            icon.textContent = '📱';
+        }
+        
+        // 创建标题
+        const title = document.createElement('div');
+        title.className = 'task-switcher-item-title';
+        title.textContent = windowInfo.title || '未命名窗口';
+        title.style.cssText = `
+            font-size: 14px;
+            font-weight: 500;
+            color: rgba(255, 255, 255, 0.9);
+            text-align: center;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            max-width: 180px;
+        `;
+        
+        // 创建状态指示
+        const status = document.createElement('div');
+        status.className = 'task-switcher-item-status';
+        if (windowInfo.isMinimized) {
+            status.textContent = '最小化';
+            status.style.color = 'rgba(255, 255, 255, 0.5)';
+        } else if (windowInfo.isFocused) {
+            status.textContent = '当前焦点';
+            status.style.color = 'rgba(108, 142, 255, 0.9)';
+        } else {
+            status.textContent = '运行中';
+            status.style.color = 'rgba(255, 255, 255, 0.7)';
+        }
+        status.style.cssText += `
+            font-size: 12px;
+            margin-top: 4px;
+            text-align: center;
+        `;
+        
+        item.appendChild(icon);
+        item.appendChild(title);
+        item.appendChild(status);
+        
+        item.style.cssText = `
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border: 2px solid rgba(255, 255, 255, 0.1);
+            border-radius: 16px;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            min-width: 180px;
+            min-height: 180px;
+            box-sizing: border-box;
+        `;
+        
+        // 悬停效果
+        item.addEventListener('mouseenter', () => {
+            if (!item.classList.contains('selected')) {
+                item.style.background = 'rgba(255, 255, 255, 0.08)';
+                item.style.borderColor = 'rgba(255, 255, 255, 0.2)';
+            }
+        });
+        
+        item.addEventListener('mouseleave', () => {
+            if (!item.classList.contains('selected')) {
+                item.style.background = 'rgba(255, 255, 255, 0.05)';
+                item.style.borderColor = 'rgba(255, 255, 255, 0.1)';
+            }
+        });
+        
+        return item;
+    }
+    
+    /**
+     * 确认任务选择
+     */
+    static _confirmTaskSelection() {
+        if (TaskbarManager._selectedTaskIndex < 0 || 
+            TaskbarManager._selectedTaskIndex >= TaskbarManager._taskSwitcherItems.length) {
+            TaskbarManager._hideTaskSwitcher();
+            return;
+        }
+        
+        const selectedItem = TaskbarManager._taskSwitcherItems[TaskbarManager._selectedTaskIndex];
+        const windowId = selectedItem.dataset.windowId;
+        
+        if (!windowId || typeof GUIManager === 'undefined') {
+            TaskbarManager._hideTaskSwitcher();
+            return;
+        }
+        
+        // 获取窗口信息
+        const windowInfo = GUIManager.getWindowInfo(windowId);
+        if (!windowInfo) {
+            TaskbarManager._hideTaskSwitcher();
+            return;
+        }
+        
+        // 如果窗口最小化，先恢复
+        if (windowInfo.isMinimized) {
+            GUIManager.restoreWindow(windowId, false);
+        }
+        
+        // 设置窗口焦点（会自动移到最上层）
+        GUIManager.focusWindow(windowId);
+        
+        // 隐藏选择器
+        TaskbarManager._hideTaskSwitcher();
+    }
+    
+    /**
+     * 隐藏全屏多任务选择器
+     */
+    static _hideTaskSwitcher() {
+        if (!TaskbarManager._taskSwitcherActive || !TaskbarManager._taskSwitcherContainer) {
+            return;
+        }
+        
+        TaskbarManager._taskSwitcherActive = false;
+        
+        // 清理滚轮节流定时器
+        if (TaskbarManager._taskSwitcherContainer._wheelTimeout) {
+            cancelAnimationFrame(TaskbarManager._taskSwitcherContainer._wheelTimeout);
+            TaskbarManager._taskSwitcherContainer._wheelTimeout = null;
+        }
+        
+        // 移除事件监听器
+        if (TaskbarManager._taskSwitcherContainer._wheelHandler) {
+            TaskbarManager._taskSwitcherContainer.removeEventListener('wheel', TaskbarManager._taskSwitcherContainer._wheelHandler);
+            TaskbarManager._taskSwitcherContainer._wheelHandler = null;
+        }
+        if (TaskbarManager._taskSwitcherContainer._clickHandler) {
+            TaskbarManager._taskSwitcherContainer.removeEventListener('mousedown', TaskbarManager._taskSwitcherContainer._clickHandler);
+            TaskbarManager._taskSwitcherContainer._clickHandler = null;
+        }
+        if (TaskbarManager._taskSwitcherContainer._escHandler) {
+            document.removeEventListener('keydown', TaskbarManager._taskSwitcherContainer._escHandler, { capture: true });
+            TaskbarManager._taskSwitcherContainer._escHandler = null;
+        }
+        
+        // 清除开始菜单的强制关闭标志，允许重新打开
+        const appMenu = document.getElementById('taskbar-app-menu');
+        if (appMenu && appMenu._forceClosed) {
+            appMenu._forceClosed = false;
+            KernelLogger.debug("TaskbarManager", "清除开始菜单的强制关闭标志");
+        }
+        
+        // 添加淡出动画
+        TaskbarManager._taskSwitcherContainer.style.animation = 'taskSwitcherFadeOut 0.2s ease-in';
+        
+        // 延迟移除DOM元素
+        setTimeout(() => {
+            if (TaskbarManager._taskSwitcherContainer && TaskbarManager._taskSwitcherContainer.parentNode) {
+                TaskbarManager._taskSwitcherContainer.parentNode.removeChild(TaskbarManager._taskSwitcherContainer);
+            }
+            TaskbarManager._taskSwitcherContainer = null;
+            TaskbarManager._taskSwitcherItems = [];
+            TaskbarManager._selectedTaskIndex = -1;
+        }, 200);
     }
 }
 

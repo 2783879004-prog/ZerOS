@@ -203,7 +203,7 @@ const unsubscribe = ThemeManager.onStyleChange((styleId, style) => {
 
 获取当前桌面背景图 ID。
 
-**返回值**: `string` - 当前桌面背景图 ID
+**返回值**: `string|null` - 当前桌面背景图 ID
 
 #### `getAllDesktopBackgrounds()`
 
@@ -217,24 +217,61 @@ const unsubscribe = ThemeManager.onStyleChange((styleId, style) => {
     id: string,
     name: string,
     description: string,
-    url: string,
-    thumbnail: string
+    path: string  // 背景图路径（相对路径或本地路径）
 }
 ```
 
-#### `setDesktopBackground(backgroundId)`
+#### `getDesktopBackground(backgroundId)`
+
+获取指定桌面背景图信息。
+
+**参数**:
+- `backgroundId` (string): 桌面背景图 ID
+
+**返回值**: `Object|null` - 桌面背景图信息对象
+
+#### `setDesktopBackground(backgroundId, save)`
 
 设置桌面背景图。
 
 **参数**:
 - `backgroundId` (string): 桌面背景图 ID
+- `save` (boolean, 可选): 是否保存到 LStorage（默认 true）
 
-**返回值**: `boolean` - 是否成功
+**返回值**: `Promise<boolean>` - 是否成功
 
 **示例**:
 ```javascript
-ThemeManager.setDesktopBackground('nature');
+await ThemeManager.setDesktopBackground('nature');
 ```
+
+#### `setLocalImageAsBackground(imagePath, save)`
+
+设置本地图片作为桌面背景（支持 JPG、PNG、GIF、WebP、SVG 等格式）。
+
+**参数**:
+- `imagePath` (string): 图片路径（C: 或 D: 开头的路径）
+- `save` (boolean, 可选): 是否保存到 LStorage（默认 true）
+
+**返回值**: `Promise<boolean>` - 是否成功
+
+**支持的格式**:
+- 静态图片：JPG、JPEG、PNG、WebP、SVG、BMP、ICO
+- 动图：GIF（自动循环播放）
+
+**示例**:
+```javascript
+// 设置本地 GIF 动图作为背景
+await ThemeManager.setLocalImageAsBackground('D:/images/background.gif');
+
+// 设置本地静态图片作为背景
+await ThemeManager.setLocalImageAsBackground('D:/images/wallpaper.jpg');
+```
+
+**注意**:
+- GIF 动图会自动循环播放，无需额外设置
+- 本地背景信息会自动保存，系统重启后自动恢复
+- 支持的图片格式会在设置前进行验证
 
 ## 使用示例
 

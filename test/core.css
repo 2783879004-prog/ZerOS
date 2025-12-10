@@ -853,36 +853,533 @@ html, body {
 }
 
 /* 应用程序菜单 */
+/* ========== 开始菜单样式（Windows 10风格，更大更美观） ========== */
+.taskbar-start-menu-win10,
+.taskbar-start-menu,
 .taskbar-app-menu {
     position: fixed;
     bottom: 70px;
     left: 20px;
-    width: 320px;
+    width: 980px;
+    height: 750px;
+    max-width: calc(100vw - 40px);
     max-height: calc(100vh - 140px);
-    background: var(--theme-background-elevated, linear-gradient(180deg, rgba(26, 31, 46, 0.98) 0%, rgba(22, 33, 62, 0.98) 100%));
-    border: 1px solid var(--theme-border, rgba(108, 142, 255, 0.2));
-    border-radius: 12px;
-    box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5), 0 6px 20px rgba(0, 0, 0, 0.3);
+    background: linear-gradient(135deg, rgba(30, 30, 30, 0.98) 0%, rgba(25, 25, 35, 0.98) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.15);
+    border-radius: 8px;
+    box-shadow: 
+        0 16px 48px rgba(0, 0, 0, 0.5),
+        0 8px 24px rgba(0, 0, 0, 0.3),
+        0 0 0 1px rgba(255, 255, 255, 0.08) inset,
+        0 1px 0 rgba(255, 255, 255, 0.1) inset;
     backdrop-filter: blur(30px) saturate(180%);
     -webkit-backdrop-filter: blur(30px) saturate(180%);
     overflow: hidden;
     opacity: 0;
-    transform: translateY(10px);
+    transform: scale(0.96) translateY(15px);
     pointer-events: none;
-    transition: opacity 0.2s ease, transform 0.2s ease;
+    transition: opacity 0.25s cubic-bezier(0.4, 0, 0.2, 1), 
+                transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
     z-index: 99998;
 }
 
+.taskbar-start-menu-win10.visible,
+.taskbar-start-menu.visible,
 .taskbar-app-menu.visible {
     opacity: 1;
-    transform: translateY(0);
+    transform: scale(1) translateY(0);
     pointer-events: auto;
 }
 
+.taskbar-start-menu-content,
 .taskbar-app-menu-content {
-    padding: 16px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    overflow: hidden;
+}
+
+/* Windows 10风格：主容器（左右分栏） */
+.taskbar-start-menu-main {
+    display: flex;
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* ========== 左侧：程序列表区域 ========== */
+.taskbar-start-menu-left {
+    width: 320px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.05) 100%);
+    border-right: 1px solid rgba(255, 255, 255, 0.12);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    box-shadow: 2px 0 8px rgba(0, 0, 0, 0.2) inset;
+}
+
+.taskbar-start-menu-program-list {
+    flex: 1;
     overflow-y: auto;
-    max-height: calc(100vh - 140px);
+    overflow-x: hidden;
+    padding: 8px 0;
+}
+
+/* 字母分组标题 */
+.taskbar-start-menu-letter-header {
+    padding: 10px 24px;
+    font-size: 13px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.6);
+    text-transform: uppercase;
+    letter-spacing: 1.5px;
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.06) 0%, rgba(255, 255, 255, 0.03) 100%);
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1) inset;
+}
+
+/* Windows 10风格程序项 */
+.taskbar-start-menu-program-item {
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    padding: 10px 24px;
+    cursor: pointer;
+    transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    color: rgba(255, 255, 255, 0.95);
+    font-size: 15px;
+    font-weight: 500;
+    position: relative;
+    border-radius: 0;
+}
+
+.taskbar-start-menu-program-item:hover {
+    background: linear-gradient(90deg, rgba(255, 255, 255, 0.12) 0%, rgba(255, 255, 255, 0.08) 100%);
+    transform: translateX(2px);
+}
+
+.taskbar-start-menu-program-item::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0;
+    bottom: 0;
+    width: 0;
+    background: linear-gradient(180deg, rgba(0, 120, 215, 0.8) 0%, rgba(0, 120, 215, 0.6) 100%);
+    transition: width 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+    box-shadow: 0 0 8px rgba(0, 120, 215, 0.4);
+}
+
+.taskbar-start-menu-program-item:hover::before {
+    width: 4px;
+}
+
+.taskbar-start-menu-program-item.running {
+    background: linear-gradient(90deg, rgba(0, 120, 215, 0.2) 0%, rgba(0, 120, 215, 0.1) 100%);
+}
+
+.taskbar-start-menu-program-item.running::before {
+    width: 4px;
+    background: linear-gradient(180deg, #0078d7 0%, #005a9e 100%);
+    box-shadow: 0 0 12px rgba(0, 120, 215, 0.6);
+}
+
+.taskbar-start-menu-program-item.running:hover {
+    background: linear-gradient(90deg, rgba(0, 120, 215, 0.3) 0%, rgba(0, 120, 215, 0.15) 100%);
+}
+
+.taskbar-start-menu-program-icon {
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.3));
+}
+
+.taskbar-start-menu-program-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.taskbar-start-menu-program-text-icon {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 120, 215, 0.3);
+    border-radius: 4px;
+    color: #fff;
+    font-size: 12px;
+    font-weight: 600;
+}
+
+.taskbar-start-menu-program-name {
+    flex: 1;
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* ========== 右侧：动态磁贴区域 ========== */
+.taskbar-start-menu-right {
+    flex: 1;
+    background: rgba(20, 20, 20, 0.8);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+.taskbar-start-menu-right-title {
+    padding: 20px 24px 16px;
+    font-size: 20px;
+    font-weight: 700;
+    color: rgba(255, 255, 255, 0.95);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.12);
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.05) 0%, transparent 100%);
+}
+
+.taskbar-start-menu-right-content {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    align-content: start;
+}
+
+/* Windows 10风格磁贴 */
+.taskbar-start-menu-tile {
+    aspect-ratio: 1;
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.08) 0%, rgba(255, 255, 255, 0.05) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.12);
+    border-radius: 8px;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    padding: 16px;
+    cursor: pointer;
+    transition: all 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.2) inset, 0 1px 0 rgba(255, 255, 255, 0.1) inset;
+    min-height: 100px;
+}
+
+.taskbar-start-menu-tile::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: rgba(255, 255, 255, 0);
+    transition: background 0.2s ease;
+    pointer-events: none;
+}
+
+.taskbar-start-menu-tile:hover {
+    background: linear-gradient(135deg, rgba(255, 255, 255, 0.15) 0%, rgba(255, 255, 255, 0.1) 100%);
+    border-color: rgba(255, 255, 255, 0.25);
+    transform: scale(1.03);
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3) inset, 0 2px 0 rgba(255, 255, 255, 0.15) inset, 0 0 20px rgba(0, 120, 215, 0.2);
+    z-index: 1;
+}
+
+.taskbar-start-menu-tile:hover::before {
+    background: rgba(255, 255, 255, 0.05);
+}
+
+.taskbar-start-menu-tile.running {
+    border-color: rgba(0, 120, 215, 0.5);
+    background: rgba(0, 120, 215, 0.1);
+}
+
+.taskbar-start-menu-tile-icon {
+    width: 48px;
+    height: 48px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    filter: drop-shadow(0 2px 4px rgba(0, 0, 0, 0.3));
+}
+
+.taskbar-start-menu-tile-icon img {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+}
+
+.taskbar-start-menu-tile-text-icon {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(0, 120, 215, 0.3);
+    border-radius: 8px;
+    color: #fff;
+    font-size: 20px;
+    font-weight: 600;
+}
+
+.taskbar-start-menu-tile-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.95);
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    width: 100%;
+    text-shadow: 0 1px 2px rgba(0, 0, 0, 0.3);
+    line-height: 1.3;
+}
+
+/* ========== 底部：用户信息和电源选项 ========== */
+.taskbar-start-menu-bottom {
+    height: 56px;
+    background: linear-gradient(180deg, rgba(20, 20, 20, 0.98) 0%, rgba(15, 15, 20, 0.98) 100%);
+    border-top: 1px solid rgba(255, 255, 255, 0.12);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 0 16px;
+    flex-shrink: 0;
+    box-shadow: 0 -2px 8px rgba(0, 0, 0, 0.3) inset;
+}
+
+/* 用户信息区域 */
+.taskbar-start-menu-user {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex: 1;
+    min-width: 0;
+}
+
+.taskbar-start-menu-user-avatar {
+    width: 32px;
+    height: 32px;
+    border-radius: 50%;
+    background: rgba(0, 120, 215, 0.3);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.taskbar-start-menu-user-name {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.9);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* 电源选项区域 */
+.taskbar-start-menu-power-section {
+    position: relative;
+    display: flex;
+    align-items: center;
+}
+
+.taskbar-start-menu-power-button {
+    width: 40px;
+    height: 40px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 0.15s ease;
+    color: rgba(255, 255, 255, 0.9);
+}
+
+.taskbar-start-menu-power-button:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.taskbar-start-menu-power-menu {
+    position: absolute;
+    bottom: 56px;
+    right: 0;
+    background: rgba(30, 30, 30, 0.98);
+    border: 1px solid rgba(255, 255, 255, 0.1);
+    border-radius: 6px;
+    box-shadow: 0 4px 16px rgba(0, 0, 0, 0.4);
+    min-width: 180px;
+    padding: 4px;
+    z-index: 1000;
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    opacity: 0;
+    transform: translateY(10px) scale(0.95);
+    pointer-events: none;
+    transition: opacity 0.2s cubic-bezier(0.4, 0, 0.2, 1), 
+                transform 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.taskbar-start-menu-power-menu.visible {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    pointer-events: auto;
+}
+
+.taskbar-start-menu-power-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 16px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: background-color 0.15s ease;
+    color: rgba(255, 255, 255, 0.9);
+    font-size: 14px;
+}
+
+.taskbar-start-menu-power-menu-item:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}
+
+.taskbar-start-menu-power-menu-item.danger {
+    color: rgba(255, 95, 87, 0.9);
+}
+
+.taskbar-start-menu-power-menu-item.danger:hover {
+    background-color: rgba(255, 95, 87, 0.15);
+}
+
+.taskbar-start-menu-power-menu-icon {
+    width: 18px;
+    height: 18px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.taskbar-start-menu-power-menu-icon svg {
+    width: 100%;
+    height: 100%;
+    fill: currentColor;
+}
+
+.taskbar-start-menu-power-menu-label {
+    flex: 1;
+}
+
+/* 滚动条样式（Windows 10风格） */
+.taskbar-start-menu-program-list::-webkit-scrollbar,
+.taskbar-start-menu-right-content::-webkit-scrollbar {
+    width: 8px;
+}
+
+.taskbar-start-menu-program-list::-webkit-scrollbar-track,
+.taskbar-start-menu-right-content::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+.taskbar-start-menu-program-list::-webkit-scrollbar-thumb,
+.taskbar-start-menu-right-content::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+}
+
+.taskbar-start-menu-program-list::-webkit-scrollbar-thumb:hover,
+.taskbar-start-menu-right-content::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+/* 开始菜单程序区域（旧版兼容） */
+.taskbar-start-menu-programs {
+    flex: 1;
+    overflow-y: auto;
+    padding: 16px;
+    min-height: 0;
+}
+
+/* 开始菜单列表（旧版兼容） */
+.taskbar-start-menu-list,
+.taskbar-app-menu-list {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+}
+
+/* 开始菜单电源区域 */
+.taskbar-start-menu-power {
+    flex-shrink: 0;
+    padding: 12px 16px;
+    border-top: 1px solid var(--theme-border, rgba(108, 142, 255, 0.2));
+    background: var(--theme-background-secondary, rgba(20, 25, 35, 0.5));
+}
+
+.taskbar-start-menu-divider {
+    height: 1px;
+    background: var(--theme-border, rgba(108, 142, 255, 0.2));
+    margin-bottom: 12px;
+}
+
+.taskbar-start-menu-power-options {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.taskbar-start-menu-power-option {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 16px;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    background: transparent;
+    color: var(--theme-text, rgba(215, 224, 221, 0.9));
+    font-size: 14px;
+    font-weight: 500;
+}
+
+.taskbar-start-menu-power-option:hover {
+    background: var(--theme-primary-light, rgba(108, 142, 255, 0.15));
+    transform: translateX(4px);
+}
+
+.taskbar-start-menu-power-option.danger {
+    color: var(--theme-error, rgba(255, 95, 87, 0.9));
+}
+
+.taskbar-start-menu-power-option.danger:hover {
+    background: var(--theme-error-light, rgba(255, 95, 87, 0.15));
+}
+
+.taskbar-start-menu-power-icon {
+    width: 20px;
+    height: 20px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    flex-shrink: 0;
+}
+
+.taskbar-start-menu-power-icon svg {
+    width: 100%;
+    height: 100%;
+    fill: currentColor;
+    stroke: currentColor;
+}
+
+.taskbar-start-menu-power-label {
+    flex: 1;
 }
 
 /* 应用程序菜单标题 */
@@ -2987,22 +3484,23 @@ html, body {
 /* 通知容器 */
 .notification-container {
     position: fixed;
-    top: 20px;
+    top: 60px;
     right: 20px;
     width: 380px;
     max-width: calc(100vw - 40px);
     height: auto;
-    max-height: calc(100vh - 40px);
+    max-height: calc(100vh - 60px - 20px);
     z-index: 10000;
     display: none;
     flex-direction: column;
-    gap: 12px;
-    padding: 0;
-    pointer-events: none;
     overflow-y: auto;
     overflow-x: hidden;
+    gap: 12px;
+    padding: 48px 0 0 0;
+    pointer-events: none;
     will-change: transform, opacity, filter;
     transform-origin: center center;
+    box-sizing: border-box;
 }
 
 .notification-container::-webkit-scrollbar {
@@ -3025,8 +3523,8 @@ html, body {
 /* 通知容器关闭按钮 */
 .notification-container-close {
     position: absolute;
-    top: 12px;
-    right: 12px;
+    top: 4px;
+    right: 8px;
     width: 32px;
     height: 32px;
     border: none;
@@ -3034,12 +3532,12 @@ html, body {
     color: #e0e0e0;
     border-radius: 50%;
     cursor: pointer;
+    z-index: 10001;
     font-size: 16px;
     display: flex;
     align-items: center;
     justify-content: center;
     transition: all 0.2s;
-    z-index: 10001;
     pointer-events: auto;
 }
 
@@ -3125,12 +3623,12 @@ html, body {
 /* 依赖类型通知的包装容器（水滴效果） */
 .notification-dependent-wrapper {
     position: relative;
-    margin-top: -12px;
+    margin-top: 0;
     margin-left: 0;
     margin-right: 0;
     margin-bottom: 12px;
     padding: 0;
-    overflow: hidden;
+    overflow: visible;
     will-change: width, height, border-radius, transform, opacity;
     transform-origin: center center;
     z-index: 1;
@@ -3151,6 +3649,8 @@ html, body {
     padding: 12px !important; /* 依赖类型通知减少 padding，因为没有标题栏 */
     gap: 0 !important; /* 依赖类型通知不需要 gap */
     animation: none !important; /* 禁用默认动画，使用包装容器的动画 */
+    overflow: visible !important; /* 确保关闭按钮不被裁切 */
+    position: relative !important; /* 为绝对定位的关闭按钮提供定位上下文 */
 }
 
 .notification-dependent-wrapper .notification-content {
@@ -3160,6 +3660,36 @@ html, body {
     gap: 0;
     padding: 0;
     margin: 0;
+}
+
+/* 依赖类型通知的关闭按钮样式 */
+.notification-dependent-close {
+    position: absolute !important;
+    top: 8px !important;
+    right: 8px !important;
+    z-index: 100 !important;
+    width: 24px !important;
+    height: 24px !important;
+    border: none !important;
+    background: rgba(255, 255, 255, 0.1) !important;
+    color: #e0e0e0 !important;
+    border-radius: 50% !important;
+    cursor: pointer !important;
+    font-size: 14px !important;
+    display: flex !important;
+    align-items: center !important;
+    justify-content: center !important;
+    transition: all 0.2s !important;
+    pointer-events: auto !important;
+}
+
+.notification-dependent-close:hover {
+    background: rgba(255, 255, 255, 0.2) !important;
+    transform: scale(1.1) !important;
+}
+
+.notification-dependent-close:active {
+    transform: scale(0.95) !important;
 }
 
 /* 响应式设计 */
@@ -3178,5 +3708,174 @@ html, body {
     
     .notification-content {
         font-size: 12px;
+    }
+}
+
+/* ========== 全屏多任务选择器样式 ========== */
+@keyframes taskSwitcherFadeIn {
+    from {
+        opacity: 0;
+    }
+    to {
+        opacity: 1;
+    }
+}
+
+@keyframes taskSwitcherFadeOut {
+    from {
+        opacity: 1;
+    }
+    to {
+        opacity: 0;
+    }
+}
+
+.task-switcher-container {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100vw;
+    height: 100vh;
+    background: rgba(0, 0, 0, 0.85);
+    backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
+    z-index: 99999;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 20px;
+    padding: 40px;
+    box-sizing: border-box;
+    animation: taskSwitcherFadeIn 0.3s ease-out;
+}
+
+.task-switcher-title {
+    font-size: 24px;
+    font-weight: 600;
+    color: rgba(255, 255, 255, 0.9);
+    margin-bottom: 20px;
+    text-align: center;
+}
+
+.task-switcher-tasks {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+    gap: 20px;
+    width: 100%;
+    max-width: 1200px;
+    max-height: calc(100vh - 200px);
+    overflow-y: auto;
+    padding: 20px;
+    box-sizing: border-box;
+}
+
+.task-switcher-tasks::-webkit-scrollbar {
+    width: 8px;
+}
+
+.task-switcher-tasks::-webkit-scrollbar-track {
+    background: rgba(255, 255, 255, 0.05);
+    border-radius: 4px;
+}
+
+.task-switcher-tasks::-webkit-scrollbar-thumb {
+    background: rgba(255, 255, 255, 0.2);
+    border-radius: 4px;
+}
+
+.task-switcher-tasks::-webkit-scrollbar-thumb:hover {
+    background: rgba(255, 255, 255, 0.3);
+}
+
+.task-switcher-item {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 20px;
+    background: rgba(255, 255, 255, 0.05);
+    border: 2px solid rgba(255, 255, 255, 0.1);
+    border-radius: 16px;
+    cursor: pointer;
+    transition: all 0.2s ease;
+    min-width: 180px;
+    min-height: 180px;
+    box-sizing: border-box;
+}
+
+.task-switcher-item:hover {
+    background: rgba(255, 255, 255, 0.08);
+    border-color: rgba(255, 255, 255, 0.2);
+    transform: translateY(-2px);
+}
+
+.task-switcher-item.selected {
+    background: rgba(108, 142, 255, 0.2);
+    border-color: rgba(108, 142, 255, 0.6);
+    box-shadow: 
+        0 8px 24px rgba(108, 142, 255, 0.3),
+        0 0 0 4px rgba(108, 142, 255, 0.1);
+    transform: scale(1.05);
+}
+
+.task-switcher-item-icon {
+    width: 64px;
+    height: 64px;
+    margin-bottom: 12px;
+    flex-shrink: 0;
+}
+
+.task-switcher-item-title {
+    font-size: 14px;
+    font-weight: 500;
+    color: rgba(255, 255, 255, 0.9);
+    text-align: center;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 180px;
+    margin-bottom: 4px;
+}
+
+.task-switcher-item.selected .task-switcher-item-title {
+    color: rgba(255, 255, 255, 1);
+    font-weight: 600;
+}
+
+.task-switcher-item-status {
+    font-size: 12px;
+    text-align: center;
+    margin-top: 4px;
+}
+
+.task-switcher-hint {
+    font-size: 14px;
+    color: rgba(255, 255, 255, 0.6);
+    margin-top: 20px;
+    text-align: center;
+}
+
+/* 响应式设计 */
+@media (max-width: 768px) {
+    .task-switcher-tasks {
+        grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+        gap: 15px;
+        padding: 15px;
+    }
+    
+    .task-switcher-item {
+        min-width: 150px;
+        min-height: 150px;
+        padding: 15px;
+    }
+    
+    .task-switcher-item-icon {
+        width: 48px;
+        height: 48px;
+    }
+    
+    .task-switcher-title {
+        font-size: 20px;
     }
 }

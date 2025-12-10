@@ -598,6 +598,18 @@ class GUIManager {
         // 最后关闭主窗口
         GUIManager._closeWindow(mainWindow.windowId, true);
         
+        // 点击关闭按钮时，必须强制显示任务栏（无论窗口状态如何）
+        GUIManager._showTaskbar();
+        KernelLogger.debug("GUIManager", `关闭主窗口及所有子窗口，强制显示任务栏`);
+        
+        // 确保任务栏可见性已更新（在所有窗口关闭后再次检查）
+        // 使用 requestAnimationFrame 确保所有窗口的状态更新和DOM操作已完成
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                GUIManager._updateTaskbarVisibility();
+            });
+        });
+        
         // 记录日志
         GUIManager._logWindowAction(mainWindow.windowId, 'CLOSE_MAIN', '主窗口及所有子窗口已关闭', {
             pid: pid,
@@ -616,6 +628,20 @@ class GUIManager {
         }
         
         const windowInfo = GUIManager._windows.get(windowId);
+        
+        // 立即更新窗口状态，确保任务栏可见性判断准确
+        // 将窗口标记为非最大化，这样任务栏可以立即恢复
+        const wasMaximized = windowInfo.isMaximized;
+        windowInfo.isMaximized = false;
+        windowInfo.isMinimized = false; // 也清除最小化状态
+        
+        // 点击关闭按钮时，必须强制显示任务栏（无论窗口状态如何）
+        GUIManager._showTaskbar();
+        KernelLogger.debug("GUIManager", `关闭窗口 ${windowId}，强制显示任务栏`);
+        
+        // 立即更新任务栏可见性（在窗口关闭动画之前）
+        // 这样即使窗口还在动画中，任务栏也能正确显示
+        GUIManager._updateTaskbarVisibility();
         
         // 如果不是强制关闭，调用onClose回调
         if (!forceClose && windowInfo.onClose) {
@@ -640,7 +666,7 @@ class GUIManager {
                 if (windowInfo.window && windowInfo.window.parentElement) {
                     windowInfo.window.remove();
                 }
-                // 注销窗口
+                // 注销窗口（此时会再次调用 _updateTaskbarVisibility，但状态已经更新，不会有问题）
                 GUIManager.unregisterWindow(windowId);
             }, closeDuration);
         } else {
@@ -733,21 +759,56 @@ class GUIManager {
             }
         }
         
+        // 保存窗口的状态（在删除之前，用于日志）
+        // 注意：此时 windowInfo.isMaximized 可能已经被 _closeWindow 设置为 false
+        // 但我们需要记录原始状态用于调试
+        const wasMaximized = windowInfo.isMaximized;
+        const wasMinimized = windowInfo.isMinimized;
+        
+        // 移除窗口（在更新任务栏可见性之前移除，确保 _updateTaskbarVisibility 不会检查到已删除的窗口）
+        GUIManager._windows.delete(windowId);
+        
+        // 更新任务栏可见性（在窗口从 Map 中删除后立即同步调用）
+        // 这样 _updateTaskbarVisibility 在检查时，已删除的窗口不会影响判断
+        // 如果删除的窗口是唯一的最大化窗口，任务栏应该立即恢复显示
+        // 注意：必须同步调用，不能使用异步，否则任务栏可能不会及时恢复
+        GUIManager._updateTaskbarVisibility();
+        
+        // 双重检查：如果窗口数为0或没有最大化窗口，强制显示任务栏
+        if (GUIManager._windows.size === 0) {
+            GUIManager._showTaskbar();
+            KernelLogger.debug("GUIManager", `所有窗口已关闭，强制显示任务栏`);
+        } else {
+            // 再次验证任务栏状态
+            const taskbar = document.getElementById('taskbar');
+            if (taskbar) {
+                const computedDisplay = getComputedStyle(taskbar).display;
+                if (computedDisplay === 'none') {
+                    // 如果没有最大化窗口但任务栏仍然隐藏，强制显示
+                    let hasMaximized = false;
+                    for (const [wid, winfo] of GUIManager._windows) {
+                        if (winfo.isMaximized && !winfo.isMinimized) {
+                            hasMaximized = true;
+                            break;
+                        }
+                    }
+                    if (!hasMaximized) {
+                        KernelLogger.warn("GUIManager", `任务栏状态不一致，强制显示任务栏`);
+                        GUIManager._showTaskbar();
+                    }
+                }
+            }
+        }
+        
         // 记录日志
         GUIManager._logWindowAction(windowId, 'UNREGISTER', '窗口已注销', {
             pid: pid,
-            title: windowInfo.title
+            title: windowInfo.title,
+            wasMaximized: wasMaximized,
+            wasMinimized: wasMinimized
         });
         
-        // 移除窗口（最后移除，确保回调可以访问）
-        GUIManager._windows.delete(windowId);
-        
-        // 如果移除的窗口是最大化的，检查是否还有其他最大化窗口，如果没有则显示任务栏
-        if (windowInfo.isMaximized) {
-            GUIManager._updateTaskbarVisibility();
-        }
-        
-        KernelLogger.debug("GUIManager", `窗口已注销: WindowID ${windowId}, PID ${pid}`);
+        KernelLogger.debug("GUIManager", `窗口已注销: WindowID ${windowId}, PID ${pid}, 最大化状态: ${wasMaximized}, 最小化状态: ${wasMinimized}, 剩余窗口数: ${GUIManager._windows.size}`);
     }
     
     /**
@@ -792,7 +853,11 @@ class GUIManager {
         if (options.icon) {
             const icon = document.createElement('div');
             icon.className = 'zos-window-icon';
-            icon.innerHTML = `<img src="${options.icon}" alt="" style="width: 20px; height: 20px;" />`;
+            // 转换虚拟路径为实际 URL
+            const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                ? ProcessManager.convertVirtualPathToUrl(options.icon)
+                : options.icon;
+            icon.innerHTML = `<img src="${iconUrl}" alt="" style="width: 20px; height: 20px;" />`;
             leftSection.appendChild(icon);
         }
         
@@ -926,6 +991,10 @@ class GUIManager {
         });
         closeBtn.addEventListener('click', (e) => {
             e.stopPropagation();
+            
+            // 点击关闭按钮时，立即强制显示任务栏
+            GUIManager._showTaskbar();
+            KernelLogger.debug("GUIManager", "点击关闭按钮，强制显示任务栏");
             
             // 如果是主窗口，关闭所有窗口（包括子窗口）
             if (windowInfo.isMainWindow) {
@@ -1851,9 +1920,15 @@ class GUIManager {
             windowInfo.window.classList.add('animate__animated', 'animate__fadeOut', 'animate__faster');
         }
         
-        // 等待动画完成后再隐藏
+        // 立即更新状态（在动画之前），确保任务栏可见性判断准确
+        windowInfo.isMinimized = true;
+        
+        // 更新任务栏可见性（在状态更新后立即调用，确保判断准确）
+        // 注意：必须在 isMinimized 设置为 true 之后调用
+        GUIManager._updateTaskbarVisibility();
+        
+        // 等待动画完成后再隐藏窗口视觉
         setTimeout(() => {
-            windowInfo.isMinimized = true;
             windowInfo.window.classList.add('zos-window-minimized');
             if (typeof AnimateManager !== 'undefined') {
                 AnimateManager.removeAnimationClasses(windowInfo.window);
@@ -1888,9 +1963,6 @@ class GUIManager {
                 }
             }
         }
-        
-        // 更新任务栏可见性（最小化后，如果没有最大化窗口，应该显示任务栏）
-        GUIManager._updateTaskbarVisibility();
         
         KernelLogger.debug("GUIManager", `窗口已最小化: WindowID ${windowId}, PID ${windowInfo.pid}`);
     }
@@ -2188,8 +2260,13 @@ class GUIManager {
             }
         }, maximizeDuration);
         
+        // 立即更新状态（在动画之前），确保任务栏可见性判断准确
         windowInfo.isMaximized = true;
         windowInfo.window.classList.add('zos-window-maximized');
+        
+        // 更新任务栏可见性（在状态更新后立即调用，确保判断准确）
+        // 注意：必须在 isMaximized 设置为 true 之后调用
+        GUIManager._updateTaskbarVisibility();
         
         // 更新最大化按钮（使用主题图标）
         const maximizeBtn = windowInfo.window.querySelector('.zos-window-btn-maximize');
@@ -2206,9 +2283,6 @@ class GUIManager {
         if (windowInfo.onMaximize) {
             windowInfo.onMaximize(true);
         }
-        
-        // 隐藏任务栏
-        GUIManager._hideTaskbar();
         
         // 记录日志
         GUIManager._logWindowAction(windowId, 'MAXIMIZE', '窗口已最大化', {
@@ -2278,16 +2352,13 @@ class GUIManager {
             windowInfo.window.style.transform = windowInfo.windowState.savedTransform;
         }
         
-        // 等待动画完成后清理
-        setTimeout(() => {
-            windowInfo.window.style.transition = '';
-            if (typeof AnimateManager !== 'undefined') {
-                AnimateManager.removeAnimationClasses(windowInfo.window);
-            }
-        }, restoreDuration);
-        
+        // 立即更新状态（在动画之前），确保任务栏可见性判断准确
         windowInfo.isMaximized = false;
         windowInfo.window.classList.remove('zos-window-maximized');
+        
+        // 更新任务栏可见性（在状态更新后立即调用，确保判断准确）
+        // 注意：必须在 isMaximized 设置为 false 之后调用
+        GUIManager._updateTaskbarVisibility();
         
         // 恢复z-index（如果之前因为全屏而提升过）
         // 重新计算z-index，确保窗口仍然在最前（如果它是焦点窗口）
@@ -2332,8 +2403,13 @@ class GUIManager {
             windowInfo.onMaximize(false);
         }
         
-        // 检查是否还有其他窗口处于最大化状态，如果没有则显示任务栏
-        GUIManager._updateTaskbarVisibility();
+        // 等待动画完成后清理
+        setTimeout(() => {
+            windowInfo.window.style.transition = '';
+            if (typeof AnimateManager !== 'undefined') {
+                AnimateManager.removeAnimationClasses(windowInfo.window);
+            }
+        }, restoreDuration);
         
         // 记录日志
         GUIManager._logWindowAction(windowId, 'RESTORE_MAXIMIZE', '窗口已还原', {
@@ -2348,9 +2424,15 @@ class GUIManager {
      */
     static _hideTaskbar() {
         const taskbar = document.getElementById('taskbar');
-        if (taskbar) {
+        if (!taskbar) {
+            KernelLogger.warn("GUIManager", "任务栏元素不存在，无法隐藏");
+            return;
+        }
+        
+        const currentDisplay = taskbar.style.display || getComputedStyle(taskbar).display;
+        if (currentDisplay !== 'none') {
             taskbar.style.display = 'none';
-            KernelLogger.debug("GUIManager", "任务栏已隐藏（窗口最大化）");
+            KernelLogger.debug("GUIManager", `任务栏已隐藏（窗口最大化）(之前: ${currentDisplay})`);
         }
     }
     
@@ -2359,31 +2441,68 @@ class GUIManager {
      */
     static _showTaskbar() {
         const taskbar = document.getElementById('taskbar');
-        if (taskbar) {
-            taskbar.style.display = '';
-            KernelLogger.debug("GUIManager", "任务栏已显示");
+        if (!taskbar) {
+            KernelLogger.warn("GUIManager", "任务栏元素不存在，无法显示");
+            return;
         }
+        
+        // 强制显示任务栏，清除所有可能隐藏它的样式
+        // 注意：任务栏的默认 display 应该是 flex（根据 CSS）
+        taskbar.style.display = 'flex';
+        taskbar.style.visibility = 'visible';
+        taskbar.style.opacity = '1';
+        
+        // 确保任务栏类名正确（如果有的话）
+        taskbar.classList.remove('hidden');
+        
+        // 强制重新计算样式，确保显示生效
+        void taskbar.offsetHeight;
+        
+        KernelLogger.debug("GUIManager", `任务栏已显示 (display: ${taskbar.style.display || getComputedStyle(taskbar).display})`);
     }
     
     /**
      * 更新任务栏可见性
      * 如果有任何窗口处于最大化状态且未最小化，则隐藏任务栏；否则显示任务栏
+     * 
+     * 逻辑说明：
+     * 1. 只有当窗口处于最大化状态（isMaximized = true）且未最小化（isMinimized = false）时，才隐藏任务栏
+     * 2. 如果窗口被最小化（isMinimized = true），即使它之前是最大化的，也应该显示任务栏
+     * 3. 如果没有任何窗口处于最大化且未最小化状态，则显示任务栏
      */
     static _updateTaskbarVisibility() {
         // 检查是否有任何窗口处于最大化状态且未最小化
         // 注意：最小化的窗口不应该隐藏任务栏，即使它之前是最大化的
-        let hasMaximizedWindow = false;
+        let hasMaximizedAndNotMinimizedWindow = false;
+        
         for (const [windowId, windowInfo] of GUIManager._windows) {
-            if (windowInfo.isMaximized && !windowInfo.isMinimized) {
-                hasMaximizedWindow = true;
+            // 必须同时满足：最大化 且 未最小化
+            if (windowInfo.isMaximized === true && windowInfo.isMinimized === false) {
+                hasMaximizedAndNotMinimizedWindow = true;
                 break;
             }
         }
         
-        if (hasMaximizedWindow) {
+        if (hasMaximizedAndNotMinimizedWindow) {
             GUIManager._hideTaskbar();
+            KernelLogger.debug("GUIManager", `任务栏已隐藏: 存在最大化且未最小化的窗口 (窗口数: ${GUIManager._windows.size})`);
         } else {
+            // 确保任务栏显示
             GUIManager._showTaskbar();
+            
+            // 验证任务栏是否真的显示了
+            const taskbar = document.getElementById('taskbar');
+            if (taskbar) {
+                const computedDisplay = getComputedStyle(taskbar).display;
+                if (computedDisplay === 'none') {
+                    KernelLogger.warn("GUIManager", `任务栏显示失败: computed display 仍然是 'none'，强制设置为 'flex'`);
+                    taskbar.style.setProperty('display', 'flex', 'important');
+                }
+            } else {
+                KernelLogger.warn("GUIManager", "任务栏元素不存在，无法验证显示状态");
+            }
+            
+            KernelLogger.debug("GUIManager", `任务栏已显示: 没有最大化且未最小化的窗口 (窗口数: ${GUIManager._windows.size})`);
         }
     }
     
@@ -2536,7 +2655,7 @@ class GUIManager {
                     // 拖动结束
                     windowInfo.windowState.isDragging = false;
                 },
-                ['.zos-window-btn', 'button']
+                ['.zos-window-btn', 'button', '.zos-window-resizer', '.videoplayer-controls-bar', '.videoplayer-progress-bar', '.videoplayer-progress-container', '.videoplayer-controls', 'video']
             );
         }
         
@@ -2547,8 +2666,9 @@ class GUIManager {
         windowElement.addEventListener('mousedown', (e) => {
             // 如果点击的是窗口本身或窗口内的元素（但不是其他窗口的元素）
             if (e.target.closest('.zos-gui-window') === windowElement) {
-                // 排除拉伸器
-                if (e.target.classList.contains('zos-window-resizer')) {
+                // 排除拉伸器（使用更严格的检查）
+                if (e.target.classList.contains('zos-window-resizer') || 
+                    e.target.closest('.zos-window-resizer')) {
                     return;
                 }
                 // 排除控制按钮（它们有自己的点击处理）
@@ -2594,7 +2714,14 @@ class GUIManager {
             cursor: se-resize;
             z-index: 1000;
             background: transparent;
+            pointer-events: auto;
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
         `;
+        // 确保拉伸器可以接收鼠标事件
+        resizerBottomRight.setAttribute('data-resizer', 'bottom-right');
         windowElement.appendChild(resizerBottomRight);
         
         // 右上角拉伸器
@@ -2609,7 +2736,14 @@ class GUIManager {
             cursor: ne-resize;
             z-index: 1000;
             background: transparent;
+            pointer-events: auto;
+            user-select: none;
+            -webkit-user-select: none;
+            -moz-user-select: none;
+            -ms-user-select: none;
         `;
+        // 确保拉伸器可以接收鼠标事件
+        resizerTopRight.setAttribute('data-resizer', 'top-right');
         windowElement.appendChild(resizerTopRight);
         
         // 注册拉伸事件

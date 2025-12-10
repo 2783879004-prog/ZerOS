@@ -9,6 +9,7 @@
 
 ### 进程管理
 - [ProcessManager.md](./ProcessManager.md) - 进程生命周期管理 ✅
+- [PermissionManager.md](./PermissionManager.md) - 权限管理 ✅
 
 ### 内存管理
 - [MemoryManager.md](./MemoryManager.md) - 统一内存管理器 ✅
@@ -32,6 +33,9 @@
 - [AnimateManager.md](./AnimateManager.md) - 动画管理 ✅
 - [NetworkManager.md](./NetworkManager.md) - 网络管理 ✅
 - [LStorage.md](./LStorage.md) - 本地存储 ✅
+
+### PHP 服务
+- [FSDirve.md](./FSDirve.md) - 文件系统驱动服务（PHP 后端） ✅
 
 ### 信号系统
 - [Pool.md](./Pool.md) - 全局对象池 ✅
@@ -62,6 +66,7 @@
 
 **进程和内存**
 - ProcessManager
+- PermissionManager
 - MemoryManager
 - KernelMemory
 
@@ -83,6 +88,8 @@
 - AnimateManager
 - NetworkManager
 - LStorage
+- PermissionManager
+- FSDirve (PHP 服务)
 
 **基础设施**
 - Pool

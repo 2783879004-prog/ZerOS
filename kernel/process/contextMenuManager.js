@@ -140,14 +140,18 @@ class ContextMenuManager {
             // 合并所有匹配的程序菜单
             const mergedItems = [];
             programMenus.forEach(({ config: menuConfig }) => {
-                if (menuConfig && menuConfig.items && Array.isArray(menuConfig.items)) {
+                if (menuConfig && menuConfig.items) {
                     // 如果 items 是函数，调用它获取动态菜单项
                     if (typeof menuConfig.items === 'function') {
-                        const dynamicItems = menuConfig.items(target);
-                        if (Array.isArray(dynamicItems)) {
-                            mergedItems.push(...dynamicItems);
+                        try {
+                            const dynamicItems = menuConfig.items(target);
+                            if (Array.isArray(dynamicItems)) {
+                                mergedItems.push(...dynamicItems);
+                            }
+                        } catch (e) {
+                            KernelLogger.warn("ContextMenuManager", `菜单项函数执行失败: ${e.message}`, e);
                         }
-                    } else {
+                    } else if (Array.isArray(menuConfig.items)) {
                         mergedItems.push(...menuConfig.items);
                     }
                 }
@@ -215,10 +219,11 @@ class ContextMenuManager {
                     // 检查选择器是否匹配（如果有）
                     if (menuConfig.selector) {
                         try {
-                            // 检查目标元素是否匹配选择器
-                            if (target.matches && target.matches(menuConfig.selector)) {
+                            // 优先使用 closest 查找匹配的元素（因为通常点击的是子元素）
+                            const closestMatch = target.closest && target.closest(menuConfig.selector);
+                            if (closestMatch) {
                                 matchedMenus.push({ pid, menuId, config: menuConfig });
-                            } else if (target.closest && target.closest(menuConfig.selector)) {
+                            } else if (target.matches && target.matches(menuConfig.selector)) {
                                 matchedMenus.push({ pid, menuId, config: menuConfig });
                             }
                         } catch (e) {
@@ -986,7 +991,11 @@ class ContextMenuManager {
             if (isImagePath) {
                 // 使用 img 元素加载图片
                 const iconImg = document.createElement('img');
-                iconImg.src = item.icon;
+                // 转换虚拟路径为实际 URL
+                const iconUrl = typeof ProcessManager !== 'undefined' && typeof ProcessManager.convertVirtualPathToUrl === 'function'
+                    ? ProcessManager.convertVirtualPathToUrl(item.icon)
+                    : item.icon;
+                iconImg.src = iconUrl;
                 iconImg.style.cssText = 'width: 16px; height: 16px; object-fit: contain;';
                 iconImg.onerror = () => {
                     // 如果图片加载失败，使用文本作为降级方案
@@ -1609,6 +1618,294 @@ class ContextMenuManager {
             content.appendChild(metadataSection);
         }
         
+        // 权限信息部分
+        if (typeof PermissionManager !== 'undefined') {
+            const permissionSection = document.createElement('div');
+            permissionSection.className = 'program-details-section';
+            
+            const permissionTitle = document.createElement('div');
+            permissionTitle.className = 'program-details-section-title';
+            permissionTitle.textContent = '权限信息';
+            permissionSection.appendChild(permissionTitle);
+            
+            const permissionList = document.createElement('div');
+            permissionList.className = 'program-details-info-list';
+            
+            // 获取程序声明的权限（从 __info__ 中）
+            let declaredPermissions = [];
+            if (programInfo?.metadata?.permissions) {
+                declaredPermissions = Array.isArray(programInfo.metadata.permissions) 
+                    ? programInfo.metadata.permissions 
+                    : [programInfo.metadata.permissions];
+            } else {
+                // 尝试从程序对象获取
+                const programNameUpper = programName.toUpperCase();
+                let programClass = null;
+                if (typeof window !== 'undefined' && window[programNameUpper]) {
+                    programClass = window[programNameUpper];
+                } else if (typeof globalThis !== 'undefined' && globalThis[programNameUpper]) {
+                    programClass = globalThis[programNameUpper];
+                }
+                
+                if (programClass && typeof programClass.__info__ === 'function') {
+                    try {
+                        const info = programClass.__info__();
+                        if (info && info.permissions) {
+                            declaredPermissions = Array.isArray(info.permissions) 
+                                ? info.permissions 
+                                : [info.permissions];
+                        }
+                    } catch (e) {
+                        // 静默处理
+                    }
+                }
+            }
+            
+            // 获取已授予的权限（如果有运行中的进程）
+            let grantedPermissions = [];
+            if (pid && typeof PermissionManager.getProgramPermissions === 'function') {
+                try {
+                    grantedPermissions = PermissionManager.getProgramPermissions(pid) || [];
+                } catch (e) {
+                    // 静默处理
+                }
+            }
+            
+            // 权限名称映射
+            const permNameMap = {
+                'SYSTEM_NOTIFICATION': '系统通知',
+                'KERNEL_DISK_READ': '读取文件',
+                'KERNEL_DISK_WRITE': '写入文件',
+                'KERNEL_DISK_DELETE': '删除文件',
+                'KERNEL_DISK_CREATE': '创建文件',
+                'KERNEL_DISK_LIST': '列出目录',
+                'KERNEL_MEMORY_READ': '读取内存',
+                'KERNEL_MEMORY_WRITE': '写入内存',
+                'NETWORK_ACCESS': '网络访问',
+                'GUI_WINDOW_CREATE': '创建窗口',
+                'GUI_WINDOW_MANAGE': '管理窗口',
+                'SYSTEM_STORAGE_READ': '读取系统存储',
+                'SYSTEM_STORAGE_WRITE': '写入系统存储',
+                'PROCESS_MANAGE': '管理进程',
+                'THEME_READ': '读取主题',
+                'THEME_WRITE': '修改主题',
+                'DESKTOP_MANAGE': '管理桌面'
+            };
+            
+            if (declaredPermissions.length > 0 || grantedPermissions.length > 0) {
+                // 显示已声明的权限
+                if (declaredPermissions.length > 0) {
+                    const declaredTitle = document.createElement('div');
+                    declaredTitle.textContent = '已声明权限:';
+                    declaredTitle.style.cssText = `
+                        color: #aab2c0;
+                        font-size: 13px;
+                        font-weight: 600;
+                        margin-top: 12px;
+                        margin-bottom: 8px;
+                    `;
+                    permissionList.appendChild(declaredTitle);
+                    
+                    declaredPermissions.forEach(perm => {
+                        const level = PermissionManager.PERMISSION_LEVEL_MAP[perm] || PermissionManager.PERMISSION_LEVEL.NORMAL;
+                        const levelText = level === PermissionManager.PERMISSION_LEVEL.NORMAL ? '普通' :
+                                        level === PermissionManager.PERMISSION_LEVEL.SPECIAL ? '特殊' : '危险';
+                        const levelColor = level === PermissionManager.PERMISSION_LEVEL.NORMAL ? '#4caf50' :
+                                         level === PermissionManager.PERMISSION_LEVEL.SPECIAL ? '#ff9800' : '#f44336';
+                        const permName = permNameMap[perm] || perm;
+                        const isGranted = grantedPermissions.includes(perm);
+                        
+                        const permItem = document.createElement('div');
+                        permItem.style.cssText = `
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            padding: 8px 0;
+                            border-bottom: 1px solid rgba(108, 142, 255, 0.1);
+                        `;
+                        
+                        const permLeft = document.createElement('div');
+                        permLeft.style.cssText = `
+                            display: flex;
+                            flex-direction: column;
+                            gap: 4px;
+                            flex: 1;
+                        `;
+                        
+                        const permNameEl = document.createElement('span');
+                        permNameEl.textContent = permName;
+                        permNameEl.style.cssText = `
+                            color: ${isGranted ? '#e8ecf0' : '#aab2c0'};
+                            font-size: 13px;
+                            font-weight: ${isGranted ? '500' : '400'};
+                        `;
+                        
+                        const permCodeEl = document.createElement('span');
+                        permCodeEl.textContent = perm;
+                        permCodeEl.style.cssText = `
+                            color: #6c8eff;
+                            font-size: 11px;
+                            font-family: monospace;
+                        `;
+                        
+                        permLeft.appendChild(permNameEl);
+                        permLeft.appendChild(permCodeEl);
+                        
+                        const permRight = document.createElement('div');
+                        permRight.style.cssText = `
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                        `;
+                        
+                        if (isGranted) {
+                            const grantedBadge = document.createElement('span');
+                            grantedBadge.textContent = '已授予';
+                            grantedBadge.style.cssText = `
+                                padding: 4px 8px;
+                                border-radius: 4px;
+                                font-size: 11px;
+                                font-weight: 600;
+                                background: rgba(76, 175, 80, 0.2);
+                                color: #4caf50;
+                                border: 1px solid rgba(76, 175, 80, 0.4);
+                            `;
+                            permRight.appendChild(grantedBadge);
+                        }
+                        
+                        const levelBadge = document.createElement('span');
+                        levelBadge.textContent = levelText;
+                        levelBadge.style.cssText = `
+                            padding: 4px 8px;
+                            border-radius: 4px;
+                            font-size: 11px;
+                            font-weight: 600;
+                            background: ${levelColor}33;
+                            color: ${levelColor};
+                            border: 1px solid ${levelColor}66;
+                        `;
+                        permRight.appendChild(levelBadge);
+                        
+                        permItem.appendChild(permLeft);
+                        permItem.appendChild(permRight);
+                        permissionList.appendChild(permItem);
+                    });
+                }
+                
+                // 显示已授予但未声明的权限（可能通过其他方式获得）
+                const extraPermissions = grantedPermissions.filter(p => !declaredPermissions.includes(p));
+                if (extraPermissions.length > 0) {
+                    const extraTitle = document.createElement('div');
+                    extraTitle.textContent = '额外授予权限:';
+                    extraTitle.style.cssText = `
+                        color: #aab2c0;
+                        font-size: 13px;
+                        font-weight: 600;
+                        margin-top: 12px;
+                        margin-bottom: 8px;
+                    `;
+                    permissionList.appendChild(extraTitle);
+                    
+                    extraPermissions.forEach(perm => {
+                        const level = PermissionManager.PERMISSION_LEVEL_MAP[perm] || PermissionManager.PERMISSION_LEVEL.NORMAL;
+                        const levelText = level === PermissionManager.PERMISSION_LEVEL.NORMAL ? '普通' :
+                                        level === PermissionManager.PERMISSION_LEVEL.SPECIAL ? '特殊' : '危险';
+                        const levelColor = level === PermissionManager.PERMISSION_LEVEL.NORMAL ? '#4caf50' :
+                                         level === PermissionManager.PERMISSION_LEVEL.SPECIAL ? '#ff9800' : '#f44336';
+                        const permName = permNameMap[perm] || perm;
+                        
+                        const permItem = document.createElement('div');
+                        permItem.style.cssText = `
+                            display: flex;
+                            justify-content: space-between;
+                            align-items: center;
+                            padding: 8px 0;
+                            border-bottom: 1px solid rgba(108, 142, 255, 0.1);
+                        `;
+                        
+                        const permLeft = document.createElement('div');
+                        permLeft.style.cssText = `
+                            display: flex;
+                            flex-direction: column;
+                            gap: 4px;
+                            flex: 1;
+                        `;
+                        
+                        const permNameEl = document.createElement('span');
+                        permNameEl.textContent = permName;
+                        permNameEl.style.cssText = `
+                            color: #e8ecf0;
+                            font-size: 13px;
+                            font-weight: 500;
+                        `;
+                        
+                        const permCodeEl = document.createElement('span');
+                        permCodeEl.textContent = perm;
+                        permCodeEl.style.cssText = `
+                            color: #6c8eff;
+                            font-size: 11px;
+                            font-family: monospace;
+                        `;
+                        
+                        permLeft.appendChild(permNameEl);
+                        permLeft.appendChild(permCodeEl);
+                        
+                        const permRight = document.createElement('div');
+                        permRight.style.cssText = `
+                            display: flex;
+                            align-items: center;
+                            gap: 8px;
+                        `;
+                        
+                        const grantedBadge = document.createElement('span');
+                        grantedBadge.textContent = '已授予';
+                        grantedBadge.style.cssText = `
+                            padding: 4px 8px;
+                            border-radius: 4px;
+                            font-size: 11px;
+                            font-weight: 600;
+                            background: rgba(76, 175, 80, 0.2);
+                            color: #4caf50;
+                            border: 1px solid rgba(76, 175, 80, 0.4);
+                        `;
+                        
+                        const levelBadge = document.createElement('span');
+                        levelBadge.textContent = levelText;
+                        levelBadge.style.cssText = `
+                            padding: 4px 8px;
+                            border-radius: 4px;
+                            font-size: 11px;
+                            font-weight: 600;
+                            background: ${levelColor}33;
+                            color: ${levelColor};
+                            border: 1px solid ${levelColor}66;
+                        `;
+                        
+                        permRight.appendChild(grantedBadge);
+                        permRight.appendChild(levelBadge);
+                        
+                        permItem.appendChild(permLeft);
+                        permItem.appendChild(permRight);
+                        permissionList.appendChild(permItem);
+                    });
+                }
+            } else {
+                const noPerms = document.createElement('div');
+                noPerms.textContent = '该程序未声明任何权限';
+                noPerms.style.cssText = `
+                    color: #aab2c0;
+                    font-size: 13px;
+                    padding: 12px;
+                    text-align: center;
+                    font-style: italic;
+                `;
+                permissionList.appendChild(noPerms);
+            }
+            
+            permissionSection.appendChild(permissionList);
+            content.appendChild(permissionSection);
+        }
+        
         windowElement.appendChild(content);
         
         // 添加到GUI容器
@@ -1755,7 +2052,8 @@ class ContextMenuManager {
             context: menuConfig.context,
             selector: menuConfig.selector,
             priority: menuConfig.priority,
-            itemCount: menuConfig.items.length
+            itemType: typeof menuConfig.items,
+            itemCount: Array.isArray(menuConfig.items) ? menuConfig.items.length : 'function'
         });
         
         return menuId;

@@ -444,26 +444,62 @@ class ProcessManager {
      * @param {string} path 脚本路径
      * @returns {Promise<void>}
      */
+    /**
+     * 将虚拟文件系统路径转换为实际 URL（公共方法，供其他模块使用）
+     * @param {string} path 虚拟路径（如 D:/application/xxx.js）
+     * @returns {string} 实际 URL（如 /service/DISK/D/application/xxx.js）
+     */
+    static convertVirtualPathToUrl(path) {
+        // 如果路径已经是 URL（以 http:// 或 https:// 或 / 开头），直接返回
+        if (path.startsWith('http://') || path.startsWith('https://') || path.startsWith('/')) {
+            // 检查是否已经是 /service/DISK/ 格式
+            if (path.startsWith('/service/DISK/')) {
+                return path;
+            }
+            // 检查是否是相对路径（不以 / 开头，但也不是 D:/ 或 C:/）
+            if (!path.match(/^[CD]:\//)) {
+                return path;
+            }
+        }
+        
+        // 处理虚拟路径 D:/ 或 C:/
+        if (path.startsWith('D:/')) {
+            // 将 D:/application/xxx.js 转换为 /service/DISK/D/application/xxx.js
+            const relativePath = path.substring(3); // 移除 "D:/"
+            return `/service/DISK/D/${relativePath}`;
+        } else if (path.startsWith('C:/')) {
+            // 将 C:/xxx.js 转换为 /service/DISK/C/xxx.js
+            const relativePath = path.substring(3); // 移除 "C:/"
+            return `/service/DISK/C/${relativePath}`;
+        }
+        
+        // 其他情况直接返回原路径
+        return path;
+    }
+    
     static _loadScript(path) {
         return new Promise((resolve, reject) => {
+            // 转换虚拟路径为实际 URL
+            const actualUrl = ProcessManager.convertVirtualPathToUrl(path);
+            
             // 检查是否已经加载过
-            const existingScript = document.querySelector(`script[src="${path}"]`);
+            const existingScript = document.querySelector(`script[src="${actualUrl}"]`);
             if (existingScript) {
-                ProcessManager._log(3, `脚本已加载: ${path}`);
+                ProcessManager._log(3, `脚本已加载: ${path} (${actualUrl})`);
                 resolve();
                 return;
             }
             
             const script = document.createElement('script');
-            script.src = path;
+            script.src = actualUrl;
             script.async = true;
             script.onload = () => {
-                ProcessManager._log(3, `脚本加载成功: ${path}`);
+                ProcessManager._log(3, `脚本加载成功: ${path} (${actualUrl})`);
                 resolve();
             };
             script.onerror = () => {
-                ProcessManager._log(1, `脚本加载失败: ${path}`);
-                reject(new Error(`Failed to load script: ${path}`));
+                ProcessManager._log(1, `脚本加载失败: ${path} (${actualUrl})`);
+                reject(new Error(`Failed to load script: ${path} (${actualUrl})`));
             };
             document.head.appendChild(script);
         });
@@ -476,10 +512,13 @@ class ProcessManager {
      */
     static _loadStylesheet(path) {
         return new Promise((resolve, reject) => {
+            // 转换虚拟路径为实际 URL
+            const actualUrl = ProcessManager.convertVirtualPathToUrl(path);
+            
             // 检查是否已经加载过
-            const existingLink = document.querySelector(`link[href="${path}"]`);
+            const existingLink = document.querySelector(`link[href="${actualUrl}"]`);
             if (existingLink) {
-                ProcessManager._log(3, `样式表已加载: ${path}`);
+                ProcessManager._log(3, `样式表已加载: ${path} (${actualUrl})`);
                 resolve();
                 return;
             }
@@ -487,14 +526,14 @@ class ProcessManager {
             const link = document.createElement('link');
             link.rel = 'stylesheet';
             link.type = 'text/css';
-            link.href = path;
+            link.href = actualUrl;
             link.onload = () => {
-                ProcessManager._log(3, `样式表加载成功: ${path}`);
+                ProcessManager._log(3, `样式表加载成功: ${path} (${actualUrl})`);
                 resolve();
             };
             link.onerror = () => {
-                ProcessManager._log(1, `样式表加载失败: ${path}`);
-                reject(new Error(`Failed to load stylesheet: ${path}`));
+                ProcessManager._log(1, `样式表加载失败: ${path} (${actualUrl})`);
+                reject(new Error(`Failed to load stylesheet: ${path} (${actualUrl})`));
             };
             document.head.appendChild(link);
         });
@@ -507,6 +546,9 @@ class ProcessManager {
      */
     static _loadAsset(path) {
         return new Promise((resolve, reject) => {
+            // 转换虚拟路径为实际 URL
+            const actualUrl = ProcessManager.convertVirtualPathToUrl(path);
+            
             // 根据文件扩展名确定资源类型
             const ext = path.split('.').pop().toLowerCase();
             const imageExts = ['svg', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'ico'];
@@ -514,9 +556,9 @@ class ProcessManager {
             
             // 检查是否已经加载过（对于图片，检查img标签；对于字体，检查link标签）
             if (imageExts.includes(ext)) {
-                const existingImg = document.querySelector(`img[src="${path}"]`);
+                const existingImg = document.querySelector(`img[src="${actualUrl}"]`);
                 if (existingImg) {
-                    ProcessManager._log(3, `图片资源已加载: ${path}`);
+                    ProcessManager._log(3, `图片资源已加载: ${path} (${actualUrl})`);
                     resolve();
                     return;
                 }
@@ -524,21 +566,21 @@ class ProcessManager {
                 // 预加载图片
                 const img = new Image();
                 img.onload = () => {
-                    ProcessManager._log(3, `图片资源加载成功: ${path}`);
+                    ProcessManager._log(3, `图片资源加载成功: ${path} (${actualUrl})`);
                     resolve();
                 };
                 img.onerror = () => {
-                    ProcessManager._log(1, `图片资源加载失败: ${path}`);
+                    ProcessManager._log(1, `图片资源加载失败: ${path} (${actualUrl})`);
                     // 图片加载失败不影响程序启动，只记录警告
                     resolve();  // 不reject，允许程序继续
                 };
-                img.src = path;
+                img.src = actualUrl;
                 
             } else if (fontExts.includes(ext)) {
                 // 检查字体是否已加载
-                const existingLink = document.querySelector(`link[href="${path}"]`);
+                const existingLink = document.querySelector(`link[href="${actualUrl}"]`);
                 if (existingLink) {
-                    ProcessManager._log(3, `字体资源已加载: ${path}`);
+                    ProcessManager._log(3, `字体资源已加载: ${path} (${actualUrl})`);
                     resolve();
                     return;
                 }
@@ -549,13 +591,13 @@ class ProcessManager {
                 link.as = 'font';
                 link.type = `font/${ext}`;
                 link.crossOrigin = 'anonymous';
-                link.href = path;
+                link.href = actualUrl;
                 link.onload = () => {
-                    ProcessManager._log(3, `字体资源加载成功: ${path}`);
+                    ProcessManager._log(3, `字体资源加载成功: ${path} (${actualUrl})`);
                     resolve();
                 };
                 link.onerror = () => {
-                    ProcessManager._log(1, `字体资源加载失败: ${path}`);
+                    ProcessManager._log(1, `字体资源加载失败: ${path} (${actualUrl})`);
                     // 字体加载失败不影响程序启动
                     resolve();  // 不reject，允许程序继续
                 };
@@ -563,21 +605,21 @@ class ProcessManager {
                 
             } else if (ext === 'js') {
                 // JavaScript文件：使用script标签加载
-                const existingScript = document.querySelector(`script[src="${path}"]`);
+                const existingScript = document.querySelector(`script[src="${actualUrl}"]`);
                 if (existingScript) {
-                    ProcessManager._log(3, `JavaScript资源已加载: ${path}`);
+                    ProcessManager._log(3, `JavaScript资源已加载: ${path} (${actualUrl})`);
                     resolve();
                     return;
                 }
                 
                 const script = document.createElement('script');
-                script.src = path;
+                script.src = actualUrl;
                 script.onload = () => {
-                    ProcessManager._log(3, `JavaScript资源加载成功: ${path}`);
+                    ProcessManager._log(3, `JavaScript资源加载成功: ${path} (${actualUrl})`);
                     resolve();
                 };
                 script.onerror = () => {
-                    ProcessManager._log(1, `JavaScript资源加载失败: ${path}`);
+                    ProcessManager._log(1, `JavaScript资源加载失败: ${path} (${actualUrl})`);
                     // JavaScript加载失败不影响程序启动
                     resolve();  // 不reject，允许程序继续
                 };
@@ -600,9 +642,9 @@ class ProcessManager {
                 }
                 
                 // 使用 fetch 预加载
-                fetchFn(path, { method: 'HEAD' })
+                fetchFn(actualUrl, { method: 'HEAD' })
                     .then(() => {
-                        ProcessManager._log(3, `资源文件可访问: ${path}`);
+                        ProcessManager._log(3, `资源文件可访问: ${path} (${actualUrl})`);
                         resolve();
                     })
                     .catch((error) => {
@@ -1047,6 +1089,30 @@ class ProcessManager {
             processInfo.status = 'starting';
             ProcessManager._saveProcessTable(ProcessManager.PROCESS_TABLE);
             
+            // 注册程序权限（从 __info__ 中读取）
+            if (typeof PermissionManager !== 'undefined') {
+                try {
+                    let programInfo = null;
+                    if (programClass && typeof programClass.__info__ === 'function') {
+                        programInfo = programClass.__info__();
+                    }
+                    if (programInfo) {
+                        // 异步注册权限，不阻塞程序启动
+                        PermissionManager.registerProgramPermissions(pid, programInfo)
+                            .then(() => {
+                                ProcessManager._log(2, `程序 ${programName} (PID: ${pid}) 权限注册完成`);
+                            })
+                            .catch(e => {
+                                ProcessManager._log(1, `注册程序权限失败: ${e.message}`);
+                                KernelLogger.error("ProcessManager", `注册程序 ${pid} 权限失败`, e);
+                            });
+                    }
+                } catch (e) {
+                    ProcessManager._log(1, `获取程序信息失败: ${e.message}`);
+                    KernelLogger.error("ProcessManager", `获取程序 ${pid} 信息失败`, e);
+                }
+            }
+            
             if (programClass && typeof programClass.__init__ === 'function') {
                 try {
                     // 构建标准化的初始化参数
@@ -1210,6 +1276,16 @@ class ProcessManager {
                     ProcessManager._log(2, `已清理程序 PID ${pid} 的依赖类型通知`);
                 } catch (e) {
                     ProcessManager._log(1, `清理程序 PID ${pid} 的通知失败: ${e.message}`);
+                }
+            }
+            
+            // 清理程序权限
+            if (typeof PermissionManager !== 'undefined' && typeof PermissionManager.clearProgramPermissions === 'function') {
+                try {
+                    PermissionManager.clearProgramPermissions(pid);
+                    ProcessManager._log(2, `已清理程序 PID ${pid} 的权限`);
+                } catch (e) {
+                    ProcessManager._log(1, `清理程序 PID ${pid} 的权限失败: ${e.message}`);
                 }
             }
             
@@ -1534,6 +1610,36 @@ class ProcessManager {
             throw new Error(`Process ${pid} is not running`);
         }
         
+        // 权限检查（如果权限管理器已加载）- 这是强制性的安全检查
+        if (typeof PermissionManager !== 'undefined') {
+            const requiredPermission = ProcessManager._getRequiredPermission(apiName);
+            if (requiredPermission) {
+                try {
+                    const hasPermission = await PermissionManager.checkAndRequestPermission(pid, requiredPermission);
+                    if (!hasPermission) {
+                        // 权限被拒绝，立即拒绝API调用，不继续执行
+                        const error = new Error(`程序 ${pid} 没有权限调用 ${apiName}（需要权限: ${requiredPermission}）。权限已被用户拒绝。`);
+                        ProcessManager._log(1, error.message);
+                        KernelLogger.error("ProcessManager", `API调用被拒绝: ${apiName} (PID: ${pid}, 权限: ${requiredPermission})`);
+                        throw error;
+                    }
+                    // 权限已授予，继续执行
+                    ProcessManager._log(2, `程序 ${pid} 已获得权限 ${requiredPermission}，允许调用 ${apiName}`);
+                } catch (e) {
+                    // 权限检查过程中发生错误，也拒绝API调用
+                    ProcessManager._log(1, `权限检查失败: ${e.message}`);
+                    KernelLogger.error("ProcessManager", `权限检查失败，拒绝API调用: ${apiName} (PID: ${pid})`, e);
+                    throw new Error(`权限检查失败: ${e.message}`);
+                }
+            } else {
+                // 该API不需要权限，记录日志
+                ProcessManager._log(3, `API ${apiName} 不需要权限检查`);
+            }
+        } else {
+            // 权限管理器未加载，记录警告但允许继续（向后兼容）
+            ProcessManager._log(2, `警告: 权限管理器未加载，跳过权限检查: ${apiName}`);
+        }
+        
         // 记录程序行为
         ProcessManager._logProgramAction(pid, 'callKernelAPI', { apiName, args });
         
@@ -1541,6 +1647,55 @@ class ProcessManager {
         
         // 执行API调用
         return await ProcessManager._executeKernelAPI(apiName, args);
+    }
+    
+    /**
+     * 获取API所需的权限
+     * @param {string} apiName API名称
+     * @returns {string|null} 所需权限，如果不需要权限则返回null
+     */
+    static _getRequiredPermission(apiName) {
+        if (typeof PermissionManager === 'undefined') {
+            return null;
+        }
+        
+        // API到权限的映射
+        const apiPermissionMap = {
+            // 文件系统API
+            'FileSystem.read': PermissionManager.PERMISSION.KERNEL_DISK_READ,
+            'FileSystem.write': PermissionManager.PERMISSION.KERNEL_DISK_WRITE,
+            'FileSystem.delete': PermissionManager.PERMISSION.KERNEL_DISK_DELETE,
+            'FileSystem.create': PermissionManager.PERMISSION.KERNEL_DISK_CREATE,
+            'FileSystem.list': PermissionManager.PERMISSION.KERNEL_DISK_LIST,
+            
+            // 通知API
+            'Notification.create': PermissionManager.PERMISSION.SYSTEM_NOTIFICATION,
+            'Notification.remove': PermissionManager.PERMISSION.SYSTEM_NOTIFICATION,
+            
+            // 网络API
+            'Network.request': PermissionManager.PERMISSION.NETWORK_ACCESS,
+            'Network.fetch': PermissionManager.PERMISSION.NETWORK_ACCESS,
+            
+            // GUI API
+            'GUI.createWindow': PermissionManager.PERMISSION.GUI_WINDOW_CREATE,
+            'GUI.manageWindow': PermissionManager.PERMISSION.GUI_WINDOW_MANAGE,
+            
+            // 存储API
+            'Storage.read': PermissionManager.PERMISSION.SYSTEM_STORAGE_READ,
+            'Storage.write': PermissionManager.PERMISSION.SYSTEM_STORAGE_WRITE,
+            
+            // 主题API
+            'Theme.read': PermissionManager.PERMISSION.THEME_READ,
+            'Theme.write': PermissionManager.PERMISSION.THEME_WRITE,
+            
+            // 桌面API
+            'Desktop.manage': PermissionManager.PERMISSION.DESKTOP_MANAGE,
+            
+            // 进程管理API
+            'Process.manage': PermissionManager.PERMISSION.PROCESS_MANAGE,
+        };
+        
+        return apiPermissionMap[apiName] || null;
     }
     
     /**
@@ -1669,9 +1824,11 @@ class ProcessManager {
                 
                 try {
                     // 解析路径：格式为 "盘符/路径" 或 "盘符"
-                    const parts = path.split('/');
+                    // 处理可能的双斜杠情况：C://path -> C:/path
+                    let normalizedPath = path.replace(/([CD]:)\/\/+/g, '$1/');
+                    const parts = normalizedPath.split('/');
                     const diskName = parts[0];
-                    const dirPath = path;
+                    const dirPath = normalizedPath;
                     
                     // 获取磁盘分区
                     if (typeof Disk === 'undefined') {
@@ -1679,8 +1836,84 @@ class ProcessManager {
                     }
                     
                     const diskMap = Disk.diskSeparateMap;
+                    
+                    // 调试信息：检查磁盘映射表
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.debug('ProcessManager', `FileSystem.list: 路径=${path}, 规范化路径=${normalizedPath}, 盘符=${diskName}, 磁盘映射表大小=${diskMap.size}`);
+                        if (diskMap.size > 0) {
+                            const diskNames = Array.from(diskMap.keys());
+                            KernelLogger.debug('ProcessManager', `FileSystem.list: 可用的磁盘分区: ${diskNames.join(', ')}`);
+                        }
+                    }
+                    
+                    // 如果磁盘映射表为空，直接从 PHP 服务获取数据（不尝试重新初始化，避免重复格式化）
+                    if (diskMap.size === 0) {
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.info('ProcessManager', `磁盘映射表为空，直接从 PHP 服务获取目录列表: ${dirPath}`);
+                        }
+                        
+                        try {
+                            const phpServiceUrl = "/service/FSDirve.php";
+                            const listUrl = new URL(phpServiceUrl, window.location.origin);
+                            listUrl.searchParams.set('action', 'list_dir');
+                            listUrl.searchParams.set('path', dirPath);
+                            
+                            const response = await fetch(listUrl.toString(), {
+                                method: 'GET',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                }
+                            });
+                            
+                            if (response.ok) {
+                                const phpResult = await response.json();
+                                if (phpResult.status === 'success' && phpResult.data && phpResult.data.items) {
+                                    // 从 PHP 服务获取到的数据
+                                    const phpItems = phpResult.data.items || [];
+                                    
+                                    // 从 PHP 服务数据构建结果
+                                    const files = phpItems.filter(item => item.type === 'file').map(item => ({
+                                        name: item.name,
+                                        size: item.size || 0,
+                                        path: item.path || `${dirPath}/${item.name}`,
+                                        type: 'file'
+                                    }));
+                                    
+                                    const dirs = phpItems.filter(item => item.type === 'directory').map(item => ({
+                                        name: item.name,
+                                        path: item.path || `${dirPath}/${item.name}`,
+                                        type: 'directory'
+                                    }));
+                                    
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.info('ProcessManager', `从 PHP 服务获取目录列表成功，文件数: ${files.length}, 目录数: ${dirs.length}`);
+                                    }
+                                    
+                                    return {
+                                        path: dirPath,
+                                        files: files,
+                                        directories: dirs
+                                    };
+                                } else {
+                                    throw new Error(phpResult?.message || 'PHP 服务返回失败');
+                                }
+                            } else {
+                                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                            }
+                        } catch (phpError) {
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.error('ProcessManager', `从 PHP 服务获取目录列表失败: ${phpError.message}`, {
+                                    path: dirPath,
+                                    error: phpError.stack
+                                });
+                            }
+                            throw new Error(`FileSystem.list: 磁盘映射表为空且无法从 PHP 服务获取数据: ${phpError.message}`);
+                        }
+                    }
+                    
                     if (!diskMap.has(diskName)) {
-                        throw new Error(`FileSystem.list: 磁盘分区不存在: ${diskName}`);
+                        const availableDisks = Array.from(diskMap.keys()).join(', ') || '无';
+                        throw new Error(`FileSystem.list: 磁盘分区不存在: ${diskName} (可用分区: ${availableDisks})`);
                     }
                     
                     const nodeTree = diskMap.get(diskName);
@@ -1689,8 +1922,80 @@ class ProcessManager {
                     }
                     
                     // 列出文件和目录
-                    const files = nodeTree.list_file(dirPath) || [];
-                    const dirs = nodeTree.list_dir(dirPath) || [];
+                    let files = nodeTree.list_file(dirPath) || [];
+                    let dirs = nodeTree.list_dir(dirPath) || [];
+                    
+                    // 如果 NodeTree 中找不到节点，尝试从 PHP 服务获取目录列表
+                    const targetNode = nodeTree.nodes.get(dirPath);
+                    const isEmpty = (!files || files.length === 0) && (!dirs || dirs.length === 0);
+                    
+                    if (!targetNode && isEmpty) {
+                        // 节点不存在且列表为空，尝试从 PHP 服务获取
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.info('ProcessManager', `NodeTree 中找不到节点 ${dirPath}，尝试从 PHP 服务获取`);
+                        }
+                        
+                        try {
+                            const phpServiceUrl = "/service/FSDirve.php";
+                            const listUrl = new URL(phpServiceUrl, window.location.origin);
+                            listUrl.searchParams.set('action', 'list_dir');
+                            listUrl.searchParams.set('path', dirPath);
+                            
+                            const response = await fetch(listUrl.toString(), {
+                                method: 'GET',
+                                headers: {
+                                    'Content-Type': 'application/json'
+                                }
+                            });
+                            
+                            if (response.ok) {
+                                const phpResult = await response.json();
+                                if (phpResult.status === 'success' && phpResult.data && phpResult.data.items) {
+                                    // 从 PHP 服务获取到的数据
+                                    const phpItems = phpResult.data.items || [];
+                                    
+                                    // 从 PHP 服务数据构建结果
+                                    files = phpItems.filter(item => item.type === 'file').map(item => ({
+                                        name: item.name,
+                                        size: item.size || 0,
+                                        path: item.path || `${dirPath}/${item.name}`,
+                                        type: 'file'
+                                    }));
+                                    
+                                    dirs = phpItems.filter(item => item.type === 'directory').map(item => ({
+                                        name: item.name,
+                                        path: item.path || `${dirPath}/${item.name}`,
+                                        type: 'directory'
+                                    }));
+                                    
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.info('ProcessManager', `从 PHP 服务获取目录列表成功，文件数: ${files.length}, 目录数: ${dirs.length}`);
+                                    }
+                                } else {
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.warn('ProcessManager', `PHP 服务返回失败: ${phpResult?.message || '未知错误'}`);
+                                    }
+                                }
+                            } else {
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.warn('ProcessManager', `PHP 服务请求失败: ${response.status} ${response.statusText}`);
+                                }
+                            }
+                        } catch (phpError) {
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.error('ProcessManager', `从 PHP 服务获取目录列表失败: ${phpError.message}`, { 
+                                    path: dirPath,
+                                    error: phpError.stack 
+                                });
+                            }
+                            // 继续使用空的文件/目录列表
+                        }
+                    } else if (!targetNode) {
+                        // 节点不存在但列表不为空（不应该发生，但记录一下）
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.debug('ProcessManager', `节点 ${dirPath} 不存在，但列表不为空（文件: ${files?.length || 0}, 目录: ${dirs?.length || 0}）`);
+                        }
+                    }
                     
                     // 格式化结果
                     const result = {
@@ -1817,6 +2122,19 @@ class ProcessManager {
             },
             'DesktopBackground.set': async (backgroundId) => {
                 return await ProcessManager.setDesktopBackground(backgroundId);
+            },
+            // 动画预设管理API
+            'AnimationPreset.getCurrent': async () => {
+                return ProcessManager.getCurrentAnimationPreset();
+            },
+            'AnimationPreset.getAll': async () => {
+                return ProcessManager.getAllAnimationPresets();
+            },
+            'AnimationPreset.get': async (presetId) => {
+                return ProcessManager.getAnimationPreset(presetId);
+            },
+            'AnimationPreset.set': async (presetId) => {
+                return await ProcessManager.setAnimationPreset(presetId);
             },
             
             // 桌面管理API
@@ -3181,6 +3499,171 @@ class ProcessManager {
         } catch (e) {
             ProcessManager._log(1, `设置桌面背景失败: ${e.message}`);
             return false;
+        }
+    }
+    
+    /**
+     * 获取当前动画预设配置（供程序调用）
+     * @param {number} pid 进程ID（可选，用于权限检查）
+     * @returns {Object|null} 当前动画预设配置
+     */
+    static getCurrentAnimationPreset(pid = null) {
+        // 如果提供了 PID，验证进程是否存在
+        if (pid !== null) {
+            const processInfo = ProcessManager.PROCESS_TABLE.get(pid);
+            if (!processInfo || (processInfo.status !== 'running' && processInfo.status !== 'starting')) {
+                throw new Error(`Process ${pid} does not exist or is not running`);
+            }
+            ProcessManager._logProgramAction(pid, 'getCurrentAnimationPreset', {});
+        }
+        
+        const themeManager = ProcessManager._getThemeManager();
+        if (!themeManager) {
+            ProcessManager._log(1, "ThemeManager 不可用");
+            return null;
+        }
+        
+        try {
+            return themeManager.getCurrentAnimationPreset();
+        } catch (e) {
+            ProcessManager._log(1, `获取当前动画预设失败: ${e.message}`);
+            return null;
+        }
+    }
+    
+    /**
+     * 获取所有动画预设列表（供程序调用）
+     * @param {number} pid 进程ID（可选，用于权限检查）
+     * @returns {Array<Object>} 动画预设列表
+     */
+    static getAllAnimationPresets(pid = null) {
+        // 如果提供了 PID，验证进程是否存在
+        if (pid !== null) {
+            const processInfo = ProcessManager.PROCESS_TABLE.get(pid);
+            if (!processInfo || (processInfo.status !== 'running' && processInfo.status !== 'starting')) {
+                throw new Error(`Process ${pid} does not exist or is not running`);
+            }
+            ProcessManager._logProgramAction(pid, 'getAllAnimationPresets', {});
+        }
+        
+        const themeManager = ProcessManager._getThemeManager();
+        if (!themeManager) {
+            ProcessManager._log(1, "ThemeManager 不可用");
+            return [];
+        }
+        
+        try {
+            return themeManager.getAllAnimationPresets();
+        } catch (e) {
+            ProcessManager._log(1, `获取所有动画预设失败: ${e.message}`);
+            return [];
+        }
+    }
+    
+    /**
+     * 获取指定动画预设配置（供程序调用）
+     * @param {string} presetId 预设ID
+     * @param {number} pid 进程ID（可选，用于权限检查）
+     * @returns {Object|null} 动画预设配置
+     */
+    static getAnimationPreset(presetId, pid = null) {
+        if (!presetId || typeof presetId !== 'string') {
+            throw new Error('presetId 必须是字符串');
+        }
+        
+        // 如果提供了 PID，验证进程是否存在
+        if (pid !== null) {
+            const processInfo = ProcessManager.PROCESS_TABLE.get(pid);
+            if (!processInfo || (processInfo.status !== 'running' && processInfo.status !== 'starting')) {
+                throw new Error(`Process ${pid} does not exist or is not running`);
+            }
+            ProcessManager._logProgramAction(pid, 'getAnimationPreset', { presetId });
+        }
+        
+        const themeManager = ProcessManager._getThemeManager();
+        if (!themeManager) {
+            ProcessManager._log(1, "ThemeManager 不可用");
+            return null;
+        }
+        
+        try {
+            return themeManager.getAnimationPreset(presetId);
+        } catch (e) {
+            ProcessManager._log(1, `获取动画预设失败: ${e.message}`);
+            return null;
+        }
+    }
+    
+    /**
+     * 设置动画预设（供程序调用）
+     * @param {string} presetId 预设ID
+     * @param {number} pid 进程ID（可选，用于权限检查）
+     * @returns {Promise<boolean>} 是否设置成功
+     */
+    static async setAnimationPreset(presetId, pid = null) {
+        if (!presetId || typeof presetId !== 'string') {
+            throw new Error('presetId 必须是字符串');
+        }
+        
+        // 如果提供了 PID，验证进程是否存在
+        if (pid !== null) {
+            const processInfo = ProcessManager.PROCESS_TABLE.get(pid);
+            if (!processInfo || (processInfo.status !== 'running' && processInfo.status !== 'starting')) {
+                throw new Error(`Process ${pid} does not exist or is not running`);
+            }
+            ProcessManager._logProgramAction(pid, 'setAnimationPreset', { presetId });
+        }
+        
+        const themeManager = ProcessManager._getThemeManager();
+        if (!themeManager) {
+            ProcessManager._log(1, "ThemeManager 不可用");
+            return false;
+        }
+        
+        try {
+            // 确保 ThemeManager 已初始化
+            if (!themeManager._initialized) {
+                await themeManager.init();
+            }
+            
+            return await themeManager.setAnimationPreset(presetId);
+        } catch (e) {
+            ProcessManager._log(1, `设置动画预设失败: ${e.message}`);
+            return false;
+        }
+    }
+    
+    /**
+     * 监听动画预设变更（供程序调用）
+     * @param {Function} listener 监听器函数
+     * @param {number} pid 进程ID（可选，用于权限检查）
+     * @returns {Function} 取消监听的函数
+     */
+    static onAnimationPresetChange(listener, pid = null) {
+        if (typeof listener !== 'function') {
+            throw new Error('listener 必须是函数');
+        }
+        
+        // 如果提供了 PID，验证进程是否存在
+        if (pid !== null) {
+            const processInfo = ProcessManager.PROCESS_TABLE.get(pid);
+            if (!processInfo || (processInfo.status !== 'running' && processInfo.status !== 'starting')) {
+                throw new Error(`Process ${pid} does not exist or is not running`);
+            }
+            ProcessManager._logProgramAction(pid, 'onAnimationPresetChange', {});
+        }
+        
+        const themeManager = ProcessManager._getThemeManager();
+        if (!themeManager) {
+            ProcessManager._log(1, "ThemeManager 不可用");
+            return () => {};
+        }
+        
+        try {
+            return themeManager.onAnimationPresetChange(listener);
+        } catch (e) {
+            ProcessManager._log(1, `注册动画预设变更监听器失败: ${e.message}`);
+            return () => {};
         }
     }
     

@@ -563,6 +563,48 @@ class EventManager {
      * @param {Event} e 事件对象
      */
     static _handleGlobalMousedown(e) {
+        // 优先处理窗口拉伸（拉伸器优先级高于拖动）
+        // 使用更精确的检测：检查点击位置是否在拉伸器区域内
+        let resizerHandled = false;
+        for (const [resizerId, resizerInfo] of EventManager._registeredResizers) {
+            const { element, window, state, onResizeStart } = resizerInfo;
+            
+            // 检查是否点击在拉伸器上（包括拉伸器本身及其子元素）
+            if (e.target === element || element.contains(e.target)) {
+                // 额外检查：确保点击位置确实在拉伸器的可视区域内
+                const rect = element.getBoundingClientRect();
+                const clickX = e.clientX;
+                const clickY = e.clientY;
+                
+                // 检查点击位置是否在拉伸器矩形内
+                const isInResizerBounds = clickX >= rect.left && 
+                                         clickX <= rect.right && 
+                                         clickY >= rect.top && 
+                                         clickY <= rect.bottom;
+                
+                if (!isInResizerBounds) {
+                    continue;
+                }
+                
+                // 检查是否全屏
+                if (state.isFullscreen) {
+                    continue;
+                }
+                
+                // 触发拉伸开始
+                onResizeStart(e);
+                resizerHandled = true;
+                e.stopPropagation(); // 阻止事件继续传播
+                e.preventDefault(); // 阻止默认行为
+                break; // 只处理一个拉伸器
+            }
+        }
+        
+        // 如果已经处理了拉伸，不再处理拖动
+        if (resizerHandled) {
+            return;
+        }
+        
         // 处理窗口拖动
         for (const [windowId, dragInfo] of EventManager._registeredDrags) {
             const { element, window, state, onDragStart, excludeSelectors } = dragInfo;
@@ -585,6 +627,36 @@ class EventManager {
                 continue;
             }
             
+            // 再次检查是否点击在拉伸器上（防止拖动时误触发拉伸）
+            // 使用更严格的检查：检查点击位置和元素层级
+            let isOnResizer = false;
+            for (const [resizerId, resizerInfo] of EventManager._registeredResizers) {
+                const { element: resizerElement, window: resizerWindow } = resizerInfo;
+                
+                // 检查目标元素是否是拉伸器或其子元素
+                if (e.target === resizerElement || resizerElement.contains(e.target)) {
+                    // 额外检查：确保点击位置确实在拉伸器的可视区域内
+                    const rect = resizerElement.getBoundingClientRect();
+                    const clickX = e.clientX;
+                    const clickY = e.clientY;
+                    
+                    const isInResizerBounds = clickX >= rect.left && 
+                                             clickX <= rect.right && 
+                                             clickY >= rect.top && 
+                                             clickY <= rect.bottom;
+                    
+                    // 检查拉伸器是否属于同一个窗口（确保是同一个窗口的拉伸器）
+                    if (isInResizerBounds && resizerWindow === window) {
+                        isOnResizer = true;
+                        break;
+                    }
+                }
+            }
+            
+            if (isOnResizer) {
+                continue;
+            }
+            
             // 检查是否全屏
             if (state.isFullscreen) {
                 continue;
@@ -592,23 +664,6 @@ class EventManager {
             
             // 触发拖动开始
             onDragStart(e);
-        }
-        
-        // 处理窗口拉伸
-        for (const [resizerId, resizerInfo] of EventManager._registeredResizers) {
-            const { element, window, state, onResizeStart } = resizerInfo;
-            
-            // 检查是否点击在拉伸器上
-            if (e.target === element || element.contains(e.target)) {
-                // 检查是否全屏
-                if (state.isFullscreen) {
-                    continue;
-                }
-                
-                // 触发拉伸开始
-                onResizeStart(e);
-                break; // 只处理一个拉伸器
-            }
         }
     }
     
