@@ -1,0 +1,9323 @@
+/* 简易 Bash 风格终端框架
+ * - 黑白高对比 UI（见 terminal.css）
+ * - 暴露接口：Terminal.env / Terminal.setCwd / setUser / setHost / clear / write / focus
+ * - 命令处理委托到可替换的 handler（默认使用 switch skeleton）
+ * - 不实现真实命令，仅提供可扩展的框架
+ * 
+ * 注意：此程序必须禁止自动初始化，通过 ProcessManager 管理
+ */
+
+// 禁止自动初始化，等待 ProcessManager 调用 __init__
+(function(window){
+    // 安全的 POOL 访问辅助函数
+    function safeGetPool() {
+        try {
+            // 尝试通过多种方式访问 POOL，避免直接引用导致 ReferenceError
+            if (typeof window !== 'undefined' && window.POOL) {
+                return window.POOL;
+            }
+            if (typeof globalThis !== 'undefined' && globalThis.POOL) {
+                return globalThis.POOL;
+            }
+            // 最后尝试直接访问（在 try-catch 中）
+            try {
+                if (typeof POOL !== 'undefined' && POOL) {
+                    return POOL;
+                }
+            } catch (e) {
+                // 如果直接访问失败，忽略
+            }
+            return null;
+        } catch (e) {
+            return null;
+        }
+    }
+    
+    // 安全的 POOL.__GET__ 包装
+    function safePoolGet(type, name) {
+        const pool = safeGetPool();
+        if (!pool || typeof pool.__GET__ !== 'function') {
+            return undefined;
+        }
+        try {
+            const result = pool.__GET__(type, name);
+            // 如果返回的是 { isInit: false }，说明类别不存在，返回 undefined
+            if (result && typeof result === 'object' && result.isInit === false) {
+                return undefined;
+            }
+            // 确保返回的是字符串（对于 WORK_SPACE）
+            if (name === 'WORK_SPACE' && result && typeof result !== 'string') {
+                // 如果返回的不是字符串，尝试转换为字符串
+                if (typeof result === 'object' && result.toString) {
+                    const str = result.toString();
+                    // 如果 toString 返回的是 [object Object]，说明不是我们想要的
+                    if (str === '[object Object]') {
+                        return undefined;
+                    }
+                    return str;
+                }
+                return undefined;
+            }
+            return result;
+        } catch (e) {
+            return undefined;
+        }
+    }
+    
+    // 安全的 POOL.__ADD__ 包装
+    function safePoolAdd(type, name, value) {
+        const pool = safeGetPool();
+        if (!pool || typeof pool.__ADD__ !== 'function') {
+            return false;
+        }
+        try {
+            pool.__ADD__(type, name, value);
+            return true;
+        } catch (e) {
+            return false;
+        }
+    }
+    
+    // 安全获取类型定义（从 POOL 或全局对象）
+    function safeGetType(typeName) {
+        // 优先从 POOL 获取
+        if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+            try {
+                const type = POOL.__GET__("TYPE_POOL", typeName);
+                if (type !== undefined && type !== null) {
+                    const poolCategory = POOL.__GET__("TYPE_POOL");
+                    if (poolCategory && (typeof poolCategory !== 'object' || poolCategory.isInit !== false)) {
+                        return type;
+                    }
+                }
+            } catch (e) {
+                // 忽略错误，继续尝试全局对象
+            }
+        }
+        
+        // 降级到全局对象
+        if (typeof window !== 'undefined' && window[typeName]) {
+            return window[typeName];
+        }
+        if (typeof globalThis !== 'undefined' && globalThis[typeName]) {
+            return globalThis[typeName];
+        }
+        
+        return undefined;
+    }
+    
+    // 路径解析工具：支持绝对盘符路径 (e.g. A:/a/b)、以 / 开头的相对盘符路径 (/dir -> A:/dir)、以及相对路径（包含 . 和 ..）
+    // 支持所有分区 A-Z（仅大写）
+    function resolvePath(cwd, inputPath){
+        if(!inputPath) return cwd;
+        // 已是绝对盘符路径，如 A: 或 A:/...（仅支持大写 A-Z）
+        if(/^[A-Z]:/.test(inputPath)){
+            // 统一反斜杠为斜杠，去重连续的斜杠，并移除末尾斜杠
+            return inputPath.replace(/\\/g,'/').replace(/\/+/g,'/').replace(/\/$/,'');
+        }
+        const root = String(cwd).split('/')[0];
+        let baseParts = String(cwd).split('/');
+        // 如果以 / 开头，表示相对于当前盘符根
+        if(inputPath.startsWith('/')){
+            baseParts = [root];
+            inputPath = inputPath.replace(/^\/+/, '');
+        }
+        const parts = inputPath.split('/').filter(Boolean);
+        for(const p of parts){
+            if(p === '.') continue;
+            if(p === '..'){
+                if(baseParts.length > 1) baseParts.pop();
+                // 若已到盘符根则保持不变
+            }else{
+                baseParts.push(p);
+            }
+        }
+        return baseParts.join('/');
+    }
+
+    // 标签页管理器
+    class TabManager {
+        constructor(pid = null) {
+            this.tabs = [];
+            this.activeTabId = null;
+            this.tabCounter = 0;
+            this.pid = pid;  // 存储进程ID，用于标记DOM元素
+            
+            // 为每个实例生成唯一的类名前缀（基于pid）
+            // 这样每个实例的DOM元素都有唯一的类名，避免CSS选择器冲突
+            // 使用 this.pid 而不是直接使用 pid 参数，确保在闭包中也能访问
+            this.classPrefix = this.pid ? `terminal-pid-${this.pid}` : 'terminal-default';
+            
+            // 确保每个实例的tabCounter是独立的
+            // 注意：tabCounter从0开始，第一个标签页会是Terminal 1
+            // 使用pid作为种子，确保不同实例的tab ID不会冲突
+            // 总是从0开始，这样第一个标签页会是Terminal 1
+            this.tabCounter = 0;
+            
+            // 为每个实例创建独立的DOM容器（使用pid区分）
+            let terminalContainer = null;
+            if (this.pid) {
+                // 尝试获取该实例的容器
+                terminalContainer = document.getElementById(`terminal-${this.pid}`);
+            }
+            
+            // 如果没有找到，尝试获取默认容器（向后兼容）
+            if (!terminalContainer) {
+                terminalContainer = document.getElementById('terminal');
+            }
+            
+            // 获取 GUI 容器（从 initArgs 或默认位置）
+            let guiContainer = null;
+            if (typeof window !== 'undefined' && window._currentInitArgs && window._currentInitArgs.guiContainer) {
+                guiContainer = window._currentInitArgs.guiContainer;
+            } else if (typeof document !== 'undefined') {
+                // 降级方案：尝试从 DOM 获取
+                guiContainer = document.getElementById('gui-container');
+            }
+            
+            // 如果 GUI 容器不存在，使用 document.body（向后兼容）
+            const parentContainer = guiContainer || document.body;
+            
+            if (!terminalContainer) {
+                // 创建终端容器（使用pid作为ID的一部分，支持多实例）
+                terminalContainer = document.createElement('div');
+                terminalContainer.id = this.pid ? `terminal-${this.pid}` : 'terminal';
+                terminalContainer.className = 'terminal-container';
+                terminalContainer.setAttribute('role', 'application');
+                terminalContainer.setAttribute('aria-label', 'Bash-like terminal');
+                if (this.pid && terminalContainer.dataset) {
+                    terminalContainer.dataset.pid = this.pid.toString();
+                }
+                // 将容器添加到 GUI 容器中，而不是直接添加到 document.body
+                parentContainer.appendChild(terminalContainer);
+            } else {
+                // 确保容器有正确的pid标记
+                if (this.pid && terminalContainer.dataset) {
+                    terminalContainer.dataset.pid = this.pid.toString();
+                }
+                // 确保容器在正确的父容器中
+                if (terminalContainer.parentElement !== parentContainer) {
+                    parentContainer.appendChild(terminalContainer);
+                }
+            }
+            
+            // 创建bash-window容器（每个实例独立，通过pid区分）
+            let bashWindow = null;
+            if (this.pid) {
+                bashWindow = terminalContainer.querySelector(`.bash-window[data-pid="${this.pid}"]`);
+            } else {
+                bashWindow = terminalContainer.querySelector('.bash-window');
+            }
+            
+            if (!bashWindow) {
+                bashWindow = document.createElement('div');
+                // 使用唯一的类名前缀，避免多实例冲突
+                bashWindow.className = `bash-window ${this.classPrefix}-bash-window`;
+                if (this.pid && bashWindow.dataset) {
+                    bashWindow.dataset.pid = this.pid.toString();
+                }
+                
+                // 初始化 _windowState 对象
+                bashWindow._windowState = {
+                    isFullscreen: false
+                };
+                
+                // 为每个实例设置不同的位置偏移和z-index，避免重叠
+                // 计算实例索引（基于pid）
+                let instanceIndex = 0;
+                if (this.pid) {
+                    // 尝试从ProcessManager获取实例索引
+                    try {
+                        const pool = safeGetPool();
+                        if (pool && typeof pool.__GET__ === 'function') {
+                            const ProcessManager = pool.__GET__("KERNEL_GLOBAL_POOL", "ProcessManager");
+                            if (ProcessManager && typeof ProcessManager.listProcesses === 'function') {
+                                const processes = ProcessManager.listProcesses();
+                                const terminalProcesses = processes.filter(p => {
+                                    const programName = p.programName || '';
+                                    return programName.toLowerCase() === 'terminal';
+                                }).sort((a, b) => (a.pid || 0) - (b.pid || 0));
+                                instanceIndex = terminalProcesses.findIndex(p => p.pid === this.pid);
+                                if (instanceIndex === -1) {
+                                    instanceIndex = terminalProcesses.length;
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // 如果获取失败，使用pid作为索引
+                        instanceIndex = (this.pid % 1000) || 0;
+                    }
+                }
+                
+                // 设置位置偏移（每个实例偏移30px）
+                // 注意：如果使用GUIManager，位置和z-index将由GUIManager管理
+                // 这里只设置初始位置，GUIManager会覆盖这些设置
+                const offsetX = instanceIndex * 30;
+                const offsetY = instanceIndex * 30;
+                bashWindow.style.left = `calc(50% + ${offsetX}px)`;
+                bashWindow.style.top = `calc(50% + ${offsetY}px)`;
+                
+                // 初始z-index（如果使用GUIManager，会被GUIManager覆盖）
+                // 注意：如果使用GUIManager，z-index由GUIManager统一管理，不应在这里设置
+                // 只有在未使用GUIManager时才设置z-index
+                // 使用安全的方式检查GUIManager是否存在，避免在声明前访问
+                let hasGUIManager = false;
+                try {
+                    const pool = safeGetPool();
+                    if (pool && typeof pool.__GET__ === 'function') {
+                        const guiMgr = pool.__GET__("KERNEL_GLOBAL_POOL", "GUIManager");
+                        hasGUIManager = (guiMgr && typeof guiMgr.registerWindow === 'function');
+                    }
+                } catch (e) {
+                    // 忽略错误
+                }
+                if (!hasGUIManager && typeof window !== 'undefined' && window.GUIManager) {
+                    hasGUIManager = (typeof window.GUIManager.registerWindow === 'function');
+                }
+                
+                if (!hasGUIManager || !this.pid) {
+                bashWindow.style.zIndex = 1000 + instanceIndex;
+                }
+                
+                // 为窗口添加点击事件，激活终端实例（使用 EventManager）
+                // 注意：窗口焦点管理由GUIManager统一处理，这里只处理终端实例的激活
+                if (typeof EventManager !== 'undefined' && this.pid) {
+                    const bashWindowId = `terminal-bash-window-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    bashWindow.dataset.eventId = bashWindowId;
+                    EventManager.registerEventHandler(this.pid, 'mousedown', (e) => {
+                        // 如果点击的是窗口本身或窗口内的元素（但不是其他窗口的元素）
+                        if (bashWindow === e.target || bashWindow.contains(e.target)) {
+                            if (e.target.closest('.bash-window') === bashWindow) {
+                                // 找到该窗口对应的TabManager实例并激活输入框
+                                if (this.pid) {
+                                    if (typeof TERMINAL !== 'undefined' && TERMINAL._instances && TERMINAL._instances.has(this.pid)) {
+                                        const instance = TERMINAL._instances.get(this.pid);
+                                        if (instance && instance.tabManager) {
+                                            const activeTerminal = instance.tabManager.getActiveTerminal();
+                                            if (activeTerminal) {
+                                                if (!activeTerminal.isActive) {
+                                                    activeTerminal._setActive(true);
+                                                }
+                                                setTimeout(() => {
+                                                    if (activeTerminal.isActive && !activeTerminal.busy) {
+                                                        activeTerminal.focus();
+                                                    }
+                                                }, 50);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }, {
+                        priority: 100,
+                        selector: `[data-event-id="${bashWindowId}"]`
+                    });
+                } else {
+                    // 降级方案
+                    bashWindow.addEventListener('mousedown', (e) => {
+                        if (e.target.closest('.bash-window') === bashWindow) {
+                            if (this.pid) {
+                                if (typeof TERMINAL !== 'undefined' && TERMINAL._instances && TERMINAL._instances.has(this.pid)) {
+                                    const instance = TERMINAL._instances.get(this.pid);
+                                    if (instance && instance.tabManager) {
+                                        const activeTerminal = instance.tabManager.getActiveTerminal();
+                                        if (activeTerminal) {
+                                            if (!activeTerminal.isActive) {
+                                                activeTerminal._setActive(true);
+                                            }
+                                            setTimeout(() => {
+                                                if (activeTerminal.isActive && !activeTerminal.busy) {
+                                                    activeTerminal.focus();
+                                                }
+                                            }, 50);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    });
+                }
+                
+                terminalContainer.appendChild(bashWindow);
+            }
+                
+                // 使用GUIManager注册窗口（如果可用）
+            // 优先从POOL获取GUIManager，如果POOL中没有，再尝试全局对象
+            let GUIManager = null;
+            try {
+                const pool = safeGetPool();
+                if (pool && typeof pool.__GET__ === 'function') {
+                    GUIManager = pool.__GET__("KERNEL_GLOBAL_POOL", "GUIManager");
+                }
+            } catch (e) {
+                // 忽略错误
+            }
+            
+            // 如果POOL中没有，尝试全局对象
+            if (!GUIManager && typeof window !== 'undefined' && window.GUIManager) {
+                GUIManager = window.GUIManager;
+            } else if (!GUIManager && typeof globalThis !== 'undefined' && globalThis.GUIManager) {
+                GUIManager = globalThis.GUIManager;
+            } else if (!GUIManager && typeof GUIManager !== 'undefined') {
+                GUIManager = GUIManager;
+            }
+            
+            if (GUIManager && typeof GUIManager.registerWindow === 'function' && this.pid) {
+                    // 获取程序图标
+                    let icon = null;
+                    try {
+                        const pool = safeGetPool();
+                        if (pool && typeof pool.__GET__ === 'function') {
+                            const ApplicationAssetManager = pool.__GET__("KERNEL_GLOBAL_POOL", "ApplicationAssetManager");
+                            if (ApplicationAssetManager && typeof ApplicationAssetManager.getIcon === 'function') {
+                                icon = ApplicationAssetManager.getIcon('terminal');
+                            }
+                        }
+                    } catch (e) {
+                        // 忽略错误
+                    }
+                    
+                    // 获取窗口标题
+                    let windowTitle = 'Terminal';
+                // 从 window._currentInitArgs 获取 initArgs（与构造函数中获取 guiContainer 的方式一致）
+                let initArgs = null;
+                if (typeof window !== 'undefined' && window._currentInitArgs) {
+                    initArgs = window._currentInitArgs;
+                }
+                    if (initArgs && initArgs.cliProgramName) {
+                        windowTitle = initArgs.cliProgramName;
+                    }
+                    
+                    const windowInfo = GUIManager.registerWindow(this.pid, bashWindow, {
+                        title: windowTitle,
+                        icon: icon,
+                        onClose: () => {
+                            // 终端特殊处理：如果是 CLI 程序专用终端，需要同时关闭关联的 CLI 程序
+                            // 注意：ProcessManager.killProgram 中已经有处理逻辑，但为了确保在窗口关闭时立即关闭 CLI 程序，
+                            // 我们在这里提前处理，避免窗口关闭动画期间 CLI 程序仍在运行
+                            const pool = safeGetPool();
+                            if (pool && typeof pool.__GET__ === 'function') {
+                                try {
+                                    const ProcessManager = pool.__GET__("KERNEL_GLOBAL_POOL", "ProcessManager");
+                                    if (ProcessManager && this.pid) {
+                                        const processInfo = ProcessManager.PROCESS_TABLE.get(this.pid);
+                                        // 检查是否是 CLI 程序专用终端
+                                        if (processInfo && processInfo.isCLITerminal) {
+                                            // 查找关联的 CLI 程序
+                                            let cliProgramPid = null;
+                                            for (const [p, info] of ProcessManager.PROCESS_TABLE) {
+                                                if (info.terminalPid === this.pid && info.isCLI && info.status === 'running') {
+                                                    cliProgramPid = p;
+                                                    break;
+                                                }
+                                            }
+                                            // 先关闭关联的 CLI 程序（异步，不阻塞窗口关闭）
+                                            if (cliProgramPid) {
+                                                ProcessManager.killProgram(cliProgramPid, false).catch(e => {
+                                                    if (typeof KernelLogger !== 'undefined') {
+                                                        KernelLogger.error('Terminal', '关闭关联 CLI 程序失败', e);
+                                                    }
+                                                });
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.error('Terminal', '获取 ProcessManager 失败', e);
+                                    }
+                                }
+                            }
+                            // onClose 回调只做清理工作，不调用 _closeWindow 或 unregisterWindow
+                            // 窗口关闭由 GUIManager._closeWindow 统一处理
+                            // _closeWindow 会在窗口关闭后检查该 PID 是否还有其他窗口，如果没有，会 kill 进程
+                            // 这样可以确保程序多实例（不同 PID）互不影响
+                        },
+                        onMinimize: () => {
+                            // 最小化回调
+                        },
+                        onMaximize: (isMaximized) => {
+                            // 最大化回调
+                            if (bashWindow && !bashWindow._windowState) {
+                                bashWindow._windowState = {};
+                            }
+                            if (bashWindow && bashWindow._windowState) {
+                                bashWindow._windowState.isFullscreen = isMaximized;
+                            }
+                        }
+                    });
+                    // 保存窗口ID，用于精确清理
+                    if (windowInfo && windowInfo.windowId) {
+                        this.windowId = windowInfo.windowId;
+                    }
+                } else {
+                    // 降级方案：手动创建标题栏（保持原有逻辑）
+                    const bar = document.createElement('div');
+                    bar.className = `bar ${this.classPrefix}-bar`;
+                    if (this.pid && bar.dataset) {
+                        bar.dataset.pid = this.pid.toString();
+                    }
+                    
+                    const controls = document.createElement('div');
+                    controls.className = `controls ${this.classPrefix}-controls`;
+                    controls.setAttribute('aria-hidden', 'true');
+                    if (this.pid && controls.dataset) {
+                        controls.dataset.pid = this.pid.toString();
+                    }
+                    
+                    const closeDot = document.createElement('span');
+                    closeDot.className = `dot close ${this.classPrefix}-dot ${this.classPrefix}-dot-close`;
+                    closeDot.title = '关闭';
+                    closeDot.setAttribute('aria-label', '关闭窗口');
+                    closeDot.setAttribute('role', 'button');
+                    closeDot.setAttribute('tabindex', '0');
+                    if (this.pid && closeDot.dataset) {
+                        closeDot.dataset.pid = this.pid.toString();
+                    }
+                    // 使用 EventManager 注册事件
+                    if (typeof EventManager !== 'undefined' && this.pid) {
+                        const closeDotId = `terminal-close-dot-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                        closeDot.dataset.eventId = closeDotId;
+                        EventManager.registerEventHandler(this.pid, 'click', () => {
+                            const pool = safeGetPool();
+                            if (pool && typeof pool.__GET__ === 'function') {
+                                try {
+                                    const ProcessManager = pool.__GET__("KERNEL_GLOBAL_POOL", "ProcessManager");
+                                    if (ProcessManager && typeof ProcessManager.killProgram === 'function' && this.pid) {
+                                        ProcessManager.killProgram(this.pid);
+                                    }
+                                } catch (e) {
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.error('Terminal', 'Failed to close terminal', e);
+                                    }
+                                }
+                            }
+                        }, {
+                            priority: 100,
+                            selector: `[data-event-id="${closeDotId}"]`
+                        });
+                    } else {
+                        // 降级方案
+                        closeDot.addEventListener('click', () => {
+                            const pool = safeGetPool();
+                            if (pool && typeof pool.__GET__ === 'function') {
+                                try {
+                                    const ProcessManager = pool.__GET__("KERNEL_GLOBAL_POOL", "ProcessManager");
+                                    if (ProcessManager && typeof ProcessManager.killProgram === 'function' && this.pid) {
+                                        ProcessManager.killProgram(this.pid);
+                                    }
+                                } catch (e) {
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.error('Terminal', 'Failed to close terminal', e);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                    
+                    const minDot = document.createElement('span');
+                    minDot.className = `dot minimize ${this.classPrefix}-dot ${this.classPrefix}-dot-minimize`;
+                    minDot.title = '最小化';
+                    minDot.setAttribute('aria-label', '最小化窗口');
+                    minDot.setAttribute('role', 'button');
+                    minDot.setAttribute('tabindex', '0');
+                    if (this.pid && minDot.dataset) {
+                        minDot.dataset.pid = this.pid.toString();
+                    }
+                    // 使用 EventManager 注册事件
+                    if (typeof EventManager !== 'undefined' && this.pid) {
+                        const minDotId = `terminal-min-dot-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                        minDot.dataset.eventId = minDotId;
+                        EventManager.registerEventHandler(this.pid, 'click', () => {
+                            let GUIManager = null;
+                            try {
+                                const pool = safeGetPool();
+                                if (pool && typeof pool.__GET__ === 'function') {
+                                    GUIManager = pool.__GET__("KERNEL_GLOBAL_POOL", "GUIManager");
+                                }
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                        if (!GUIManager && typeof window !== 'undefined' && window.GUIManager) {
+                            GUIManager = window.GUIManager;
+                        } else if (!GUIManager && typeof globalThis !== 'undefined' && globalThis.GUIManager) {
+                            GUIManager = globalThis.GUIManager;
+                        }
+                        
+                        if (bashWindow && GUIManager && typeof GUIManager.minimizeWindow === 'function' && this.pid) {
+                            GUIManager.minimizeWindow(this.pid);
+                        } else if (bashWindow) {
+                            bashWindow.style.display = 'none';
+                        }
+                    }, {
+                        priority: 100,
+                        selector: `[data-event-id="${minDotId}"]`
+                    });
+                    } else {
+                        // 降级方案
+                        minDot.addEventListener('click', () => {
+                            let GUIManager = null;
+                            try {
+                                const pool = safeGetPool();
+                                if (pool && typeof pool.__GET__ === 'function') {
+                                    GUIManager = pool.__GET__("KERNEL_GLOBAL_POOL", "GUIManager");
+                                }
+                            } catch (e) {
+                                // 忽略错误
+                            }
+                            if (!GUIManager && typeof window !== 'undefined' && window.GUIManager) {
+                                GUIManager = window.GUIManager;
+                            } else if (!GUIManager && typeof globalThis !== 'undefined' && globalThis.GUIManager) {
+                                GUIManager = globalThis.GUIManager;
+                            }
+                            
+                            if (bashWindow && GUIManager && typeof GUIManager.minimizeWindow === 'function' && this.pid) {
+                                GUIManager.minimizeWindow(this.pid);
+                            } else if (bashWindow) {
+                                bashWindow.style.display = 'none';
+                            }
+                        });
+                    }
+                    
+                    const maxDot = document.createElement('span');
+                    maxDot.className = `dot maximize ${this.classPrefix}-dot ${this.classPrefix}-dot-maximize`;
+                    maxDot.title = '全屏/还原';
+                    maxDot.setAttribute('aria-label', '全屏/还原窗口');
+                    maxDot.setAttribute('role', 'button');
+                    maxDot.setAttribute('tabindex', '0');
+                    if (this.pid && maxDot.dataset) {
+                        maxDot.dataset.pid = this.pid.toString();
+                    }
+                    // 使用 EventManager 注册事件
+                    if (typeof EventManager !== 'undefined' && this.pid) {
+                        const maxDotId = `terminal-max-dot-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                        maxDot.dataset.eventId = maxDotId;
+                        EventManager.registerEventHandler(this.pid, 'click', () => {
+                        if (!bashWindow) return;
+                        
+                        let GUIManager = null;
+                        try {
+                            const pool = safeGetPool();
+                            if (pool && typeof pool.__GET__ === 'function') {
+                                GUIManager = pool.__GET__("KERNEL_GLOBAL_POOL", "GUIManager");
+                            }
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                        if (!GUIManager && typeof window !== 'undefined' && window.GUIManager) {
+                            GUIManager = window.GUIManager;
+                        } else if (!GUIManager && typeof globalThis !== 'undefined' && globalThis.GUIManager) {
+                            GUIManager = globalThis.GUIManager;
+                        }
+                        
+                        if (GUIManager && typeof GUIManager.toggleMaximize === 'function' && this.pid) {
+                            GUIManager.toggleMaximize(this.pid);
+                        } else {
+                            // 降级方案：原有逻辑
+                            const state = bashWindow._windowState;
+                            
+                            if (!state.isFullscreen) {
+                                const rect = bashWindow.getBoundingClientRect();
+                                state.savedStyle = {
+                                    top: bashWindow.style.top || (rect.top + 'px'),
+                                    left: bashWindow.style.left || (rect.left + 'px'),
+                                    width: bashWindow.style.width || (rect.width + 'px'),
+                                    height: bashWindow.style.height || (rect.height + 'px'),
+                                    transform: bashWindow.style.transform || '',
+                                    maxWidth: bashWindow.style.maxWidth || '',
+                                    maxHeight: bashWindow.style.maxHeight || '',
+                                    borderRadius: bashWindow.style.borderRadius || ''
+                                };
+                                
+                                bashWindow.style.position = 'fixed';
+                                bashWindow.style.top = '0';
+                                bashWindow.style.left = '0';
+                                bashWindow.style.width = '100vw';
+                                bashWindow.style.height = '100vh';
+                                bashWindow.style.transform = 'none';
+                                bashWindow.style.maxWidth = 'none';
+                                bashWindow.style.maxHeight = 'none';
+                                bashWindow.style.borderRadius = '0';
+                                bashWindow.classList.add('fullscreen');
+                                state.isFullscreen = true;
+                                maxDot.title = '还原';
+                                bar.style.cursor = 'default';
+                                bar.style.pointerEvents = 'auto';
+                            } else {
+                                if (state.savedStyle) {
+                                    bashWindow.style.top = state.savedStyle.top || '';
+                                    bashWindow.style.left = state.savedStyle.left || '';
+                                    bashWindow.style.width = state.savedStyle.width || '';
+                                    bashWindow.style.height = state.savedStyle.height || '';
+                                    bashWindow.style.transform = state.savedStyle.transform || '';
+                                    bashWindow.style.maxWidth = state.savedStyle.maxWidth || '';
+                                    bashWindow.style.maxHeight = state.savedStyle.maxHeight || '';
+                                    bashWindow.style.borderRadius = state.savedStyle.borderRadius || '';
+                                } else {
+                                    bashWindow.style.top = '';
+                                    bashWindow.style.left = '';
+                                    bashWindow.style.width = '';
+                                    bashWindow.style.height = '';
+                                    bashWindow.style.transform = 'translate(-50%, -50%)';
+                                    bashWindow.style.maxWidth = '';
+                                    bashWindow.style.maxHeight = '';
+                                    bashWindow.style.borderRadius = '';
+                                }
+                                bashWindow.classList.remove('fullscreen');
+                                state.isFullscreen = false;
+                                maxDot.title = '全屏/还原';
+                                bar.style.cursor = 'move';
+                            }
+                        }
+                    });
+                    
+                    controls.appendChild(closeDot);
+                    controls.appendChild(minDot);
+                    controls.appendChild(maxDot);
+                
+                    // 存储窗口管理状态
+                    bashWindow._windowState = {
+                        isFullscreen: false,
+                        savedStyle: null,
+                        isDragging: false,
+                        dragStartX: 0,
+                        dragStartY: 0,
+                        dragStartLeft: 0,
+                        dragStartTop: 0,
+                        isResizing: false,
+                        resizeStartX: 0,
+                        resizeStartY: 0,
+                        resizeStartWidth: 0,
+                        resizeStartHeight: 0,
+                        resizeStartTop: 0,
+                        resizeAnchor: null  // 'bottom-right' 或 'top-right'
+                    };
+                    // 降级方案：手动创建标题栏和拖拽功能
+                    bar.style.cursor = 'move';
+                    
+                    // 使用 EventManager 注册拖动事件
+                    if (typeof EventManager !== 'undefined' && typeof EventManager.registerDrag === 'function') {
+                        const windowId = `terminal-window-${this.pid || 'default'}`;
+                        
+                        EventManager.registerDrag(
+                            windowId,
+                            bar,
+                            bashWindow,
+                            bashWindow._windowState,
+                            // onDragStart
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                if (state.isFullscreen) {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    return;
+                                }
+                                
+                                // 拖拽开始时，将窗口置于最上层
+                                const allWindows = document.querySelectorAll('.bash-window');
+                                allWindows.forEach(win => {
+                                    win.classList.remove('focused');
+                                });
+                                bashWindow.classList.add('focused');
+                                
+                                state.isDragging = true;
+                                state.dragStartX = e.clientX;
+                                state.dragStartY = e.clientY;
+                                const rect = bashWindow.getBoundingClientRect();
+                                state.dragStartLeft = rect.left;
+                                state.dragStartTop = rect.top;
+                                
+                                bashWindow.style.position = 'fixed';
+                                bashWindow.style.transform = 'none';
+                                bashWindow.style.left = state.dragStartLeft + 'px';
+                                bashWindow.style.top = state.dragStartTop + 'px';
+                                bashWindow.classList.add('floating');
+                                
+                                e.preventDefault();
+                            },
+                            // onDrag
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                if (state.isFullscreen) {
+                                    state.isDragging = false;
+                                    return;
+                                }
+                                
+                                if (state.isDragging) {
+                                    const deltaX = e.clientX - state.dragStartX;
+                                    const deltaY = e.clientY - state.dragStartY;
+                                    
+                                    // 边界检查：确保窗口不超出 gui-container
+                                    const guiContainer = document.getElementById('gui-container');
+                                    if (guiContainer) {
+                                        const containerRect = guiContainer.getBoundingClientRect();
+                                        const winWidth = bashWindow.offsetWidth;
+                                        const winHeight = bashWindow.offsetHeight;
+                                        
+                                        let newLeft = state.dragStartLeft + deltaX;
+                                        let newTop = state.dragStartTop + deltaY;
+                                        
+                                        // 限制在容器内
+                                        newLeft = Math.max(containerRect.left, Math.min(newLeft, containerRect.right - winWidth));
+                                        newTop = Math.max(containerRect.top, Math.min(newTop, containerRect.bottom - winHeight));
+                                        
+                                        bashWindow.style.left = newLeft + 'px';
+                                        bashWindow.style.top = newTop + 'px';
+                                    } else {
+                                        bashWindow.style.left = (state.dragStartLeft + deltaX) + 'px';
+                                        bashWindow.style.top = (state.dragStartTop + deltaY) + 'px';
+                                    }
+                                }
+                            },
+                            // onDragEnd
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                state.isDragging = false;
+                            },
+                            ['.dot', '.controls'] // 排除的选择器
+                        );
+                    } else {
+                        // 降级方案：使用原有逻辑
+                        bar.addEventListener('mousedown', (e) => {
+                            if (e.target.classList.contains('dot') || e.target.closest('.controls')) {
+                                return;
+                            }
+                            
+                            if (e.target === bar || bar.contains(e.target)) {
+                                const state = bashWindow._windowState;
+                                if (state.isFullscreen) {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    return;
+                                }
+                                
+                                const allWindows = document.querySelectorAll('.bash-window');
+                                allWindows.forEach(win => {
+                                    win.classList.remove('focused');
+                                });
+                                bashWindow.classList.add('focused');
+                                
+                                state.isDragging = true;
+                                state.dragStartX = e.clientX;
+                                state.dragStartY = e.clientY;
+                                const rect = bashWindow.getBoundingClientRect();
+                                state.dragStartLeft = rect.left;
+                                state.dragStartTop = rect.top;
+                                
+                                bashWindow.style.position = 'fixed';
+                                bashWindow.style.transform = 'none';
+                                bashWindow.style.left = state.dragStartLeft + 'px';
+                                bashWindow.style.top = state.dragStartTop + 'px';
+                                bashWindow.classList.add('floating');
+                                
+                                e.preventDefault();
+                            }
+                        });
+                        
+                        // 降级方案：处理拖动和拉伸的 mousemove 和 mouseup
+                        const handleMousemove = (e) => {
+                            const state = bashWindow._windowState;
+                            if (state.isFullscreen) {
+                                if (state.isDragging) {
+                                    state.isDragging = false;
+                                }
+                                if (state.isResizing) {
+                                    state.isResizing = false;
+                                }
+                                return;
+                            }
+                            
+                            if (state.isDragging) {
+                                const deltaX = e.clientX - state.dragStartX;
+                                const deltaY = e.clientY - state.dragStartY;
+                                bashWindow.style.left = (state.dragStartLeft + deltaX) + 'px';
+                                bashWindow.style.top = (state.dragStartTop + deltaY) + 'px';
+                            }
+                            
+                            if (state.isResizing) {
+                                const deltaX = e.clientX - state.resizeStartX;
+                                const deltaY = e.clientY - state.resizeStartY;
+                                const newWidth = Math.max(480, state.resizeStartWidth + deltaX);
+                                
+                                if (state.resizeAnchor === 'top-right') {
+                                    const newHeight = Math.max(320, state.resizeStartHeight - deltaY);
+                                    const newTop = state.resizeStartTop + (state.resizeStartHeight - newHeight);
+                                    bashWindow.style.width = newWidth + 'px';
+                                    bashWindow.style.height = newHeight + 'px';
+                                    bashWindow.style.top = newTop + 'px';
+                                } else {
+                                    const newHeight = Math.max(320, state.resizeStartHeight + deltaY);
+                                    bashWindow.style.width = newWidth + 'px';
+                                    bashWindow.style.height = newHeight + 'px';
+                                }
+                            }
+                        };
+                        
+                        const handleMouseup = () => {
+                            const state = bashWindow._windowState;
+                            state.isDragging = false;
+                            state.isResizing = false;
+                        };
+                        
+                        // 使用 EventManager 注册临时拖动事件
+                        if (typeof EventManager !== 'undefined' && this.pid) {
+                            const mousemoveHandlerId = EventManager.registerEventHandler(this.pid, 'mousemove', handleMousemove, {
+                                priority: 50,
+                                once: false
+                            });
+                            
+                            const mouseupHandlerId = EventManager.registerEventHandler(this.pid, 'mouseup', handleMouseup, {
+                                priority: 50,
+                                once: true
+                            });
+                            
+                            // 存储事件处理器ID，以便后续清理
+                            if (!bashWindow._dragEventHandlers) {
+                                bashWindow._dragEventHandlers = [];
+                            }
+                            bashWindow._dragEventHandlers.push(mousemoveHandlerId, mouseupHandlerId);
+                        } else {
+                            // 降级：直接使用 addEventListener（不推荐）
+                            document.addEventListener('mousemove', handleMousemove);
+                            document.addEventListener('mouseup', handleMouseup);
+                            bashWindow._fallbackMousemove = handleMousemove;
+                            bashWindow._fallbackMouseup = handleMouseup;
+                        }
+                    }
+                    
+                    // 拉伸功能：在窗口右下角和右上角添加resizer
+                    // 右下角resizer（右下角拉伸）
+                    let resizer = bashWindow.querySelector(`.window-resizer.bottom-right[data-pid="${this.pid}"]`);
+                    if (!resizer) {
+                    resizer = document.createElement('div');
+                    resizer.className = `window-resizer bottom-right ${this.classPrefix}-resizer ${this.classPrefix}-resizer-bottom-right`;
+                    resizer.style.cssText = `
+                        position: absolute;
+                        right: 0;
+                        bottom: 0;
+                        width: 20px;
+                        height: 20px;
+                        cursor: se-resize;
+                        background: transparent;
+                        z-index: 1000;
+                    `;
+                    if (this.pid && resizer.dataset) {
+                        resizer.dataset.pid = this.pid.toString();
+                    }
+                    bashWindow.appendChild(resizer);
+                    
+                    // 使用 EventManager 注册拉伸事件（右下角）
+                    if (typeof EventManager !== 'undefined' && typeof EventManager.registerResizer === 'function') {
+                        const resizerId = `terminal-resizer-bottom-right-${this.pid || 'default'}`;
+                        
+                        EventManager.registerResizer(
+                            resizerId,
+                            resizer,
+                            bashWindow,
+                            bashWindow._windowState,
+                            // onResizeStart
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                if (state.isFullscreen) {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    return;
+                                }
+                                
+                                const allWindows = document.querySelectorAll('.bash-window');
+                                allWindows.forEach(win => {
+                                    win.classList.remove('focused');
+                                });
+                                bashWindow.classList.add('focused');
+                                
+                                state.isResizing = true;
+                                state.resizeStartX = e.clientX;
+                                state.resizeStartY = e.clientY;
+                                const rect = bashWindow.getBoundingClientRect();
+                                state.resizeStartWidth = rect.width;
+                                state.resizeStartHeight = rect.height;
+                                state.resizeAnchor = 'bottom-right';
+                                
+                                bashWindow.style.position = 'fixed';
+                                bashWindow.style.transform = 'none';
+                                const currentRect = bashWindow.getBoundingClientRect();
+                                bashWindow.style.left = currentRect.left + 'px';
+                                bashWindow.style.top = currentRect.top + 'px';
+                                bashWindow.classList.add('floating');
+                                
+                                e.preventDefault();
+                                e.stopPropagation();
+                            },
+                            // onResize
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                if (state.isFullscreen) {
+                                    state.isResizing = false;
+                                    return;
+                                }
+                                
+                                if (state.isResizing && state.resizeAnchor === 'bottom-right') {
+                                    const deltaX = e.clientX - state.resizeStartX;
+                                    const deltaY = e.clientY - state.resizeStartY;
+                                    const newWidth = Math.max(480, state.resizeStartWidth + deltaX);
+                                    const newHeight = Math.max(320, state.resizeStartHeight + deltaY);
+                                    
+                                    // 边界检查
+                                    const guiContainer = document.getElementById('gui-container');
+                                    if (guiContainer) {
+                                        const containerRect = guiContainer.getBoundingClientRect();
+                                        const rect = bashWindow.getBoundingClientRect();
+                                        
+                                        const maxWidth = containerRect.right - rect.left;
+                                        const maxHeight = containerRect.bottom - rect.top;
+                                        
+                                        bashWindow.style.width = Math.min(newWidth, maxWidth) + 'px';
+                                        bashWindow.style.height = Math.min(newHeight, maxHeight) + 'px';
+                                    } else {
+                                        bashWindow.style.width = newWidth + 'px';
+                                        bashWindow.style.height = newHeight + 'px';
+                                    }
+                                }
+                            },
+                            // onResizeEnd
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                state.isResizing = false;
+                            }
+                        );
+                    } else {
+                        // 降级方案
+                        resizer.addEventListener('mousedown', (e) => {
+                            const state = bashWindow._windowState;
+                            if (state.isFullscreen) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                return;
+                            }
+                            
+                            const allWindows = document.querySelectorAll('.bash-window');
+                            allWindows.forEach(win => {
+                                win.classList.remove('focused');
+                            });
+                            bashWindow.classList.add('focused');
+                            
+                            state.isResizing = true;
+                            state.resizeStartX = e.clientX;
+                            state.resizeStartY = e.clientY;
+                            const rect = bashWindow.getBoundingClientRect();
+                            state.resizeStartWidth = rect.width;
+                            state.resizeStartHeight = rect.height;
+                            state.resizeAnchor = 'bottom-right';
+                            
+                            bashWindow.style.position = 'fixed';
+                            bashWindow.style.transform = 'none';
+                            const currentRect = bashWindow.getBoundingClientRect();
+                            bashWindow.style.left = currentRect.left + 'px';
+                            bashWindow.style.top = currentRect.top + 'px';
+                            bashWindow.classList.add('floating');
+                            
+                            e.preventDefault();
+                            e.stopPropagation();
+                        });
+                    }
+                }
+                
+                // 右上角resizer（右上角拉伸）
+                let resizerTopRight = bashWindow.querySelector(`.window-resizer.top-right[data-pid="${this.pid}"]`);
+                if (!resizerTopRight) {
+                    resizerTopRight = document.createElement('div');
+                    resizerTopRight.className = `window-resizer top-right ${this.classPrefix}-resizer ${this.classPrefix}-resizer-top-right`;
+                    resizerTopRight.style.cssText = `
+                        position: absolute;
+                        right: 0;
+                        top: 0;
+                        width: 20px;
+                        height: 20px;
+                        cursor: ne-resize;
+                        background: transparent;
+                        z-index: 1000;
+                    `;
+                    if (this.pid && resizerTopRight.dataset) {
+                        resizerTopRight.dataset.pid = this.pid.toString();
+                    }
+                    bashWindow.appendChild(resizerTopRight);
+                    
+                    // 使用 EventManager 注册拉伸事件（右上角）
+                    if (typeof EventManager !== 'undefined' && typeof EventManager.registerResizer === 'function') {
+                        const resizerId = `terminal-resizer-top-right-${this.pid || 'default'}`;
+                        
+                        EventManager.registerResizer(
+                            resizerId,
+                            resizerTopRight,
+                            bashWindow,
+                            bashWindow._windowState,
+                            // onResizeStart
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                if (state.isFullscreen) {
+                                    e.preventDefault();
+                                    e.stopPropagation();
+                                    return;
+                                }
+                                
+                                const allWindows = document.querySelectorAll('.bash-window');
+                                allWindows.forEach(win => {
+                                    win.classList.remove('focused');
+                                });
+                                bashWindow.classList.add('focused');
+                                
+                                state.isResizing = true;
+                                state.resizeStartX = e.clientX;
+                                state.resizeStartY = e.clientY;
+                                const rect = bashWindow.getBoundingClientRect();
+                                state.resizeStartWidth = rect.width;
+                                state.resizeStartHeight = rect.height;
+                                state.resizeStartTop = rect.top;
+                                state.resizeAnchor = 'top-right';
+                                
+                                bashWindow.style.position = 'fixed';
+                                bashWindow.style.transform = 'none';
+                                const currentRect = bashWindow.getBoundingClientRect();
+                                bashWindow.style.left = currentRect.left + 'px';
+                                bashWindow.style.top = currentRect.top + 'px';
+                                bashWindow.classList.add('floating');
+                                
+                                e.preventDefault();
+                                e.stopPropagation();
+                            },
+                            // onResize
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                if (state.isFullscreen) {
+                                    state.isResizing = false;
+                                    return;
+                                }
+                                
+                                if (state.isResizing && state.resizeAnchor === 'top-right') {
+                                    const deltaX = e.clientX - state.resizeStartX;
+                                    const deltaY = e.clientY - state.resizeStartY;
+                                    const newWidth = Math.max(480, state.resizeStartWidth + deltaX);
+                                    const newHeight = Math.max(320, state.resizeStartHeight - deltaY);
+                                    const newTop = state.resizeStartTop + (state.resizeStartHeight - newHeight);
+                                    
+                                    // 边界检查
+                                    const guiContainer = document.getElementById('gui-container');
+                                    if (guiContainer) {
+                                        const containerRect = guiContainer.getBoundingClientRect();
+                                        const rect = bashWindow.getBoundingClientRect();
+                                        
+                                        const maxWidth = containerRect.right - rect.left;
+                                        const maxHeight = rect.bottom - containerRect.top;
+                                        
+                                        bashWindow.style.width = Math.min(newWidth, maxWidth) + 'px';
+                                        bashWindow.style.height = Math.min(newHeight, maxHeight) + 'px';
+                                        bashWindow.style.top = Math.max(containerRect.top, newTop) + 'px';
+                                    } else {
+                                        bashWindow.style.width = newWidth + 'px';
+                                        bashWindow.style.height = newHeight + 'px';
+                                        bashWindow.style.top = newTop + 'px';
+                                    }
+                                }
+                            },
+                            // onResizeEnd
+                            (e) => {
+                                const state = bashWindow._windowState;
+                                state.isResizing = false;
+                            }
+                        );
+                    } else {
+                        // 降级方案
+                        resizerTopRight.addEventListener('mousedown', (e) => {
+                            const state = bashWindow._windowState;
+                            if (state.isFullscreen) {
+                                e.preventDefault();
+                                e.stopPropagation();
+                                return;
+                            }
+                            
+                            const allWindows = document.querySelectorAll('.bash-window');
+                            allWindows.forEach(win => {
+                                win.classList.remove('focused');
+                            });
+                            bashWindow.classList.add('focused');
+                            
+                            state.isResizing = true;
+                            state.resizeStartX = e.clientX;
+                            state.resizeStartY = e.clientY;
+                            const rect = bashWindow.getBoundingClientRect();
+                            state.resizeStartWidth = rect.width;
+                            state.resizeStartHeight = rect.height;
+                            state.resizeStartTop = rect.top;
+                            state.resizeAnchor = 'top-right';
+                            
+                            bashWindow.style.position = 'fixed';
+                            bashWindow.style.transform = 'none';
+                            const currentRect = bashWindow.getBoundingClientRect();
+                            bashWindow.style.left = currentRect.left + 'px';
+                            bashWindow.style.top = currentRect.top + 'px';
+                            bashWindow.classList.add('floating');
+                            
+                            e.preventDefault();
+                            e.stopPropagation();
+                        });
+                    }
+                }
+                
+                // 创建标题并添加到bar（仅在降级方案中）
+                const title = document.createElement('div');
+                title.className = `title ${this.classPrefix}-title`;
+                title.textContent = 'bash — ZerOS Kernel';
+                if (this.pid && title.dataset) {
+                    title.dataset.pid = this.pid.toString();
+                }
+                
+                bar.appendChild(controls);
+                bar.appendChild(title);
+                bashWindow.appendChild(bar);
+                }
+            }
+            
+            // 获取或创建标签页容器（使用pid特定的选择器）
+            this.tabsContainer = bashWindow.querySelector(`.tabs-container[data-pid="${this.pid}"]`);
+            if (!this.tabsContainer) {
+                this.tabsContainer = document.createElement('div');
+                this.tabsContainer.className = `tabs-container ${this.classPrefix}-tabs-container`;
+                if (this.pid && this.tabsContainer.dataset) {
+                    this.tabsContainer.dataset.pid = this.pid.toString();
+                }
+                
+                // 如果使用GUIManager，标签页栏应该在标题栏之后
+                // 查找标题栏，如果存在则插入到标题栏之后，否则添加到开头
+                const titleBar = bashWindow.querySelector('.zos-window-titlebar');
+                if (titleBar && titleBar.nextSibling) {
+                    bashWindow.insertBefore(this.tabsContainer, titleBar.nextSibling);
+                } else if (titleBar) {
+                    bashWindow.appendChild(this.tabsContainer);
+                } else {
+                    // 如果没有标题栏，添加到开头
+                    bashWindow.insertBefore(this.tabsContainer, bashWindow.firstChild);
+                }
+            }
+            
+            // 使用pid特定的ID，避免多实例冲突
+            const tabsBarId = this.pid ? `tabs-bar-${this.pid}` : 'tabs-bar';
+            this.tabsBar = document.getElementById(tabsBarId);
+            if (!this.tabsBar) {
+                this.tabsBar = document.createElement('div');
+                this.tabsBar.className = `tabs-bar ${this.classPrefix}-tabs-bar`;
+                this.tabsBar.id = tabsBarId;
+                if (this.pid && this.tabsBar.dataset) {
+                    this.tabsBar.dataset.pid = this.pid.toString();
+                }
+                this.tabsContainer.appendChild(this.tabsBar);
+            }
+            
+            // 使用pid特定的ID，避免多实例冲突
+            const tabAddBtnId = this.pid ? `tab-add-btn-${this.pid}` : 'tab-add-btn';
+            this.tabAddBtn = document.getElementById(tabAddBtnId);
+            if (!this.tabAddBtn) {
+                this.tabAddBtn = document.createElement('button');
+                this.tabAddBtn.className = `tab-add-btn ${this.classPrefix}-tab-add-btn`;
+                this.tabAddBtn.id = tabAddBtnId;
+                this.tabAddBtn.textContent = '+';
+                this.tabAddBtn.title = '新建标签页';
+                if (this.pid && this.tabAddBtn.dataset) {
+                    this.tabAddBtn.dataset.pid = this.pid.toString();
+                }
+                this.tabsContainer.appendChild(this.tabAddBtn);
+            }
+            
+            // 使用pid特定的ID，避免多实例冲突
+            const terminalsContainerId = this.pid ? `terminals-container-${this.pid}` : 'terminals-container';
+            this.terminalsContainer = document.getElementById(terminalsContainerId);
+            if (!this.terminalsContainer) {
+                this.terminalsContainer = document.createElement('div');
+                this.terminalsContainer.className = `terminals-container ${this.classPrefix}-terminals-container`;
+                this.terminalsContainer.id = terminalsContainerId;
+                if (this.pid && this.terminalsContainer.dataset) {
+                    this.terminalsContainer.dataset.pid = this.pid.toString();
+                }
+                bashWindow.appendChild(this.terminalsContainer);
+            }
+            
+            // 检查是否禁用标签页功能（用于CLI程序专用终端）
+            this.disableTabs = false;
+            if (typeof window !== 'undefined' && window._currentInitArgs && window._currentInitArgs.disableTabs) {
+                this.disableTabs = true;
+            }
+            
+            // 如果禁用标签页，隐藏标签页相关UI
+            if (this.disableTabs) {
+                if (this.tabsBar) {
+                    this.tabsBar.style.display = 'none';
+                }
+                if (this.tabAddBtn) {
+                    this.tabAddBtn.style.display = 'none';
+                }
+            } else {
+                // 绑定添加标签页按钮（使用 EventManager）
+                if (typeof EventManager !== 'undefined' && this.pid) {
+                    const tabAddBtnId = `terminal-tab-add-btn-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    this.tabAddBtn.dataset.eventId = tabAddBtnId;
+                    EventManager.registerEventHandler(this.pid, 'click', () => {
+                        this.createTab();
+                    }, {
+                        priority: 100,
+                        selector: `[data-event-id="${tabAddBtnId}"]`
+                    });
+                } else {
+                    // 降级方案
+                    this.tabAddBtn.addEventListener('click', () => this.createTab());
+                }
+            }
+            
+            // 创建第一个标签页（即使禁用标签页，也需要一个终端实例）
+            this.createTab();
+        }
+        
+        createTab(title = null) {
+            // 先递增计数器
+            ++this.tabCounter;
+            // 确保tabId是唯一的（包含pid以避免不同实例间的冲突）
+            const tabId = this.pid ? `tab-${this.pid}-${this.tabCounter}` : `tab-${this.tabCounter}`;
+            const tabTitle = title || `Terminal ${this.tabCounter}`;
+            
+            // 标记DOM元素的辅助函数
+            const markElement = (element) => {
+                if (this.pid && element && element.dataset) {
+                    element.dataset.pid = this.pid.toString();
+                }
+            };
+            
+            // 创建标签页 DOM（使用唯一的类名）
+            const tabEl = document.createElement('div');
+            tabEl.className = `tab ${this.classPrefix}-tab`;
+            tabEl.dataset.tabId = tabId;
+            markElement(tabEl);
+            
+            const tabTitleEl = document.createElement('span');
+            tabTitleEl.className = `tab-title ${this.classPrefix}-tab-title`;
+            tabTitleEl.textContent = tabTitle;
+            markElement(tabTitleEl);
+            
+            const tabCloseEl = document.createElement('button');
+            tabCloseEl.className = `tab-close ${this.classPrefix}-tab-close`;
+            tabCloseEl.textContent = '×';
+            tabCloseEl.title = '关闭标签页';
+            markElement(tabCloseEl);
+            // 使用 EventManager 注册事件
+            if (typeof EventManager !== 'undefined' && this.pid) {
+                const tabCloseElId = `terminal-tab-close-${tabId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                tabCloseEl.dataset.eventId = tabCloseElId;
+                EventManager.registerEventHandler(this.pid, 'click', (e) => {
+                    if (tabCloseEl === e.target || tabCloseEl.contains(e.target)) {
+                        e.stopPropagation();
+                        this.closeTab(tabId);
+                    }
+                }, {
+                    priority: 100,
+                    selector: `[data-event-id="${tabCloseElId}"]`
+                });
+                
+                const tabElId = `terminal-tab-${tabId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                tabEl.dataset.eventId = tabElId;
+                EventManager.registerEventHandler(this.pid, 'click', () => {
+                    this.switchTab(tabId);
+                }, {
+                    priority: 100,
+                    selector: `[data-event-id="${tabElId}"]`
+                });
+            } else {
+                // 降级方案
+                tabCloseEl.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    this.closeTab(tabId);
+                });
+                tabEl.addEventListener('click', () => this.switchTab(tabId));
+            }
+            
+            tabEl.appendChild(tabTitleEl);
+            tabEl.appendChild(tabCloseEl);
+            
+            this.tabsBar.appendChild(tabEl);
+            
+            // 创建终端实例容器（使用唯一的类名）
+            const terminalInstanceEl = document.createElement('div');
+            terminalInstanceEl.className = `terminal-instance ${this.classPrefix}-terminal-instance`;
+            terminalInstanceEl.dataset.tabId = tabId;
+            markElement(terminalInstanceEl);
+            
+            const outputEl = document.createElement('div');
+            outputEl.className = `output ${this.classPrefix}-output`;
+            outputEl.setAttribute('aria-live', 'polite');
+            markElement(outputEl);
+            
+            const inputLineEl = document.createElement('div');
+            inputLineEl.className = `line input-area ${this.classPrefix}-input-area`;
+            markElement(inputLineEl);
+            
+            const promptEl = document.createElement('span');
+            promptEl.className = `prompt ${this.classPrefix}-prompt`;
+            markElement(promptEl);
+            
+            const cmdEl = document.createElement('span');
+            cmdEl.className = `cmd ${this.classPrefix}-cmd`;
+            cmdEl.setAttribute('contenteditable', 'true');
+            cmdEl.setAttribute('spellcheck', 'false');
+            cmdEl.setAttribute('aria-label', '命令输入');
+            cmdEl.setAttribute('tabindex', '0');
+            markElement(cmdEl);
+            
+            inputLineEl.appendChild(promptEl);
+            inputLineEl.appendChild(cmdEl);
+            
+            terminalInstanceEl.appendChild(outputEl);
+            terminalInstanceEl.appendChild(inputLineEl);
+            
+            this.terminalsContainer.appendChild(terminalInstanceEl);
+            
+            // 创建终端实例（传入终端容器元素引用和pid）
+            const terminalInstance = new TerminalInstance(tabId, outputEl, promptEl, cmdEl, terminalInstanceEl, this.pid);
+            // 保存输入行引用，用于隐藏整个输入行
+            terminalInstance.inputLineEl = inputLineEl;
+            
+            // 保存标签页信息
+            const tab = {
+                id: tabId,
+                title: tabTitle,
+                element: tabEl,
+                terminalInstance: terminalInstance,
+                terminalElement: terminalInstanceEl
+            };
+            
+            this.tabs.push(tab);
+            
+            // 为新标签页注册命令处理器
+            if (typeof registerCommandHandlers === 'function') {
+                registerCommandHandlers(terminalInstance);
+            }
+            
+            // 在切换标签页之前，先禁用所有标签页的输入框（除了即将激活的）
+            this.tabs.forEach(t => {
+                if (t.id !== tabId && t.terminalInstance && t.terminalInstance.cmdEl) {
+                    t.terminalInstance.cmdEl.setAttribute('tabindex', '-1');
+                    t.terminalInstance.cmdEl.setAttribute('contenteditable', 'false');
+                }
+            });
+            
+            // 确保新标签页的输入框是启用的
+            if (terminalInstance && terminalInstance.cmdEl) {
+                terminalInstance.cmdEl.setAttribute('tabindex', '0');
+                terminalInstance.cmdEl.setAttribute('contenteditable', 'true');
+            }
+            
+            this.switchTab(tabId);
+            
+            return tab;
+        }
+
+        switchTab(tabId) {
+            if (this.activeTabId === tabId) return;
+            
+            // 验证标签页是否存在
+            const targetTab = this.tabs.find(t => t.id === tabId);
+            if (!targetTab) {
+                // 如果目标标签页不存在，尝试切换到第一个标签页
+                if (this.tabs.length > 0) {
+                    const firstTab = this.tabs[0];
+                    if (firstTab && firstTab.id !== this.activeTabId) {
+                        this.switchTab(firstTab.id);
+                    }
+                }
+                return;
+            }
+            
+            // 隐藏当前活动标签页
+            if (this.activeTabId) {
+                const activeTab = this.tabs.find(t => t.id === this.activeTabId);
+                if (activeTab) {
+                    // 先强制移除焦点
+                    if (activeTab.terminalInstance && activeTab.terminalInstance.cmdEl) {
+                        // 如果当前焦点在这个输入框上，先移除焦点
+                        if (document.activeElement === activeTab.terminalInstance.cmdEl) {
+                            activeTab.terminalInstance.cmdEl.blur();
+                        }
+                        // 禁用非活动标签页的输入框，防止接收键盘事件
+                        activeTab.terminalInstance.cmdEl.setAttribute('tabindex', '-1');
+                        activeTab.terminalInstance.cmdEl.setAttribute('contenteditable', 'false');
+                        // 如果标签页处于 busy 状态，确保命令输入保持隐藏
+                        if (activeTab.terminalInstance.busy) {
+                            if (activeTab.terminalInstance.inputLineEl) {
+                                activeTab.terminalInstance.inputLineEl.style.display = 'none';
+                            } else {
+                                activeTab.terminalInstance.cmdEl.style.display = 'none';
+                                if (activeTab.terminalInstance.promptEl) {
+                                    activeTab.terminalInstance.promptEl.style.display = 'none';
+                                }
+                            }
+                        }
+                    }
+                    
+                    activeTab.element.classList.remove('active');
+                    activeTab.terminalElement.classList.remove('active');
+                    activeTab.terminalInstance._setActive(false);
+                }
+            }
+            
+            // 显示新标签页
+            const tab = this.tabs.find(t => t.id === tabId);
+            if (tab) {
+                tab.element.classList.add('active');
+                tab.terminalElement.classList.add('active');
+                this.activeTabId = tabId;
+                
+                // 启用活动标签页的输入框（只有在非 busy 状态下才显示）
+                if (tab.terminalInstance && tab.terminalInstance.cmdEl) {
+                    tab.terminalInstance.cmdEl.setAttribute('tabindex', '0');
+                    // 只有在非 busy 状态下才启用输入框
+                    if (!tab.terminalInstance.busy) {
+                        // 显示整个输入行
+                        if (tab.terminalInstance.inputLineEl) {
+                            tab.terminalInstance.inputLineEl.style.display = '';
+                        } else {
+                            tab.terminalInstance.cmdEl.style.display = '';
+                            if (tab.terminalInstance.promptEl) {
+                                tab.terminalInstance.promptEl.style.display = '';
+                            }
+                        }
+                        tab.terminalInstance.cmdEl.setAttribute('contenteditable', 'true');
+                    } else {
+                        // busy 状态下保持隐藏
+                        if (tab.terminalInstance.inputLineEl) {
+                            tab.terminalInstance.inputLineEl.style.display = 'none';
+                        } else {
+                            tab.terminalInstance.cmdEl.style.display = 'none';
+                            if (tab.terminalInstance.promptEl) {
+                                tab.terminalInstance.promptEl.style.display = 'none';
+                            }
+                        }
+                        tab.terminalInstance.cmdEl.setAttribute('contenteditable', 'false');
+                    }
+                }
+                
+                // 先设置 activeTabId，再调用 _setActive，确保焦点正确
+                tab.terminalInstance._setActive(true);
+                
+                // 确保窗口获得焦点（提升z-index）
+                const bashWindow = tab.terminalElement ? tab.terminalElement.closest('.bash-window') : null;
+                if (bashWindow) {
+                    // 移除所有其他窗口的焦点状态
+                    const allWindows = document.querySelectorAll('.bash-window');
+                    allWindows.forEach(win => {
+                        if (win !== bashWindow) {
+                            win.classList.remove('focused');
+                        }
+                    });
+                    // 为当前窗口添加焦点状态
+                    bashWindow.classList.add('focused');
+                }
+            }
+        }
+        
+        closeTab(tabId) {
+            if (this.tabs.length <= 1) {
+                // 至少保留一个标签页
+                return;
+            }
+            
+            const tabIndex = this.tabs.findIndex(t => t.id === tabId);
+            if (tabIndex === -1) return;
+            
+            const tab = this.tabs[tabIndex];
+            const wasActive = (this.activeTabId === tabId);
+            
+            // 如果关闭的是活动标签页，先清理状态
+            if (wasActive) {
+                // 先强制移除焦点
+                if (tab.terminalInstance && tab.terminalInstance.cmdEl) {
+                    if (document.activeElement === tab.terminalInstance.cmdEl) {
+                        tab.terminalInstance.cmdEl.blur();
+                    }
+                    tab.terminalInstance.cmdEl.setAttribute('tabindex', '-1');
+                    tab.terminalInstance.cmdEl.setAttribute('contenteditable', 'false');
+                }
+                // 清理终端实例状态
+                if (tab.terminalInstance) {
+                    tab.terminalInstance._setActive(false);
+                }
+                // 清除活动标签页ID
+                this.activeTabId = null;
+            }
+            
+            // 移除 DOM 元素
+            if (tab.element && tab.element.parentNode) {
+                tab.element.remove();
+            }
+            if (tab.terminalElement && tab.terminalElement.parentNode) {
+                tab.terminalElement.remove();
+            }
+            
+            // 从数组中移除
+            this.tabs.splice(tabIndex, 1);
+            
+            // 如果关闭的是活动标签页，切换到其他标签页
+            if (wasActive && this.tabs.length > 0) {
+                // 计算新活动标签页的索引（关闭后数组已变化）
+                // 如果关闭的是最后一个标签页，选择前一个；否则选择当前索引位置的标签页
+                const newActiveIndex = tabIndex >= this.tabs.length ? this.tabs.length - 1 : tabIndex;
+                if (newActiveIndex >= 0 && newActiveIndex < this.tabs.length) {
+                    const newTabId = this.tabs[newActiveIndex].id;
+                    // 确保新标签页存在且有效
+                    if (newTabId && this.tabs.find(t => t.id === newTabId)) {
+                        this.switchTab(newTabId);
+                    } else if (this.tabs.length > 0) {
+                        // 如果找不到，选择第一个标签页
+                        this.switchTab(this.tabs[0].id);
+                    }
+                } else if (this.tabs.length > 0) {
+                    // 如果索引无效，选择第一个标签页
+                    this.switchTab(this.tabs[0].id);
+                }
+            }
+        }
+        
+        getActiveTerminal() {
+            const activeTab = this.tabs.find(t => t.id === this.activeTabId);
+            return activeTab ? activeTab.terminalInstance : null;
+        }
+    }
+    
+    // 全局标签页管理器
+    let tabManager = null;
+    
+    // 为终端实例注册命令处理器的函数（需要在 TabManager 之前定义，但需要 TerminalInstance 类）
+    // 这个函数将在 TerminalInstance 类定义后，TabManager 初始化前定义
+    let registerCommandHandlers = null;
+
+function escapeHtml(s){
+    return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+    // Markdown渲染函数
+    function renderMarkdown(markdown) {
+        if (!markdown) return '';
+        
+        let html = '<div class="markdown-content" style="font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; line-height: 1.6; color: #d4d4d4; padding: 10px; background: #1e1e1e;">';
+        
+        const lines = markdown.split('\n');
+        let inCodeBlock = false;
+        let codeBlockLang = '';
+        let codeBlockContent = [];
+        let inList = false;
+        let listType = null; // 'ul' or 'ol'
+        
+        for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            const trimmedLine = line.trim();
+            
+            // 代码块处理
+            if (trimmedLine.startsWith('```')) {
+                if (inCodeBlock) {
+                    // 结束代码块
+                    const codeContent = codeBlockContent.join('\n');
+                    html += `<pre style="background: #252526; padding: 12px; border-radius: 4px; overflow-x: auto; border-left: 3px solid #007acc; margin: 10px 0;"><code style="font-family: 'Consolas', 'Monaco', monospace; color: #d4d4d4;">${escapeHtml(codeContent)}</code></pre>`;
+                    codeBlockContent = [];
+                    inCodeBlock = false;
+                    codeBlockLang = '';
+                } else {
+                    // 开始代码块
+                    inCodeBlock = true;
+                    codeBlockLang = trimmedLine.substring(3).trim();
+                }
+                continue;
+            }
+            
+            if (inCodeBlock) {
+                codeBlockContent.push(line);
+                continue;
+            }
+            
+            // 标题处理
+            if (trimmedLine.startsWith('# ')) {
+                if (inList) { html += `</${listType}>`; inList = false; listType = null; }
+                html += `<h1 style="color: #4EC9B0; font-size: 2em; margin: 20px 0 10px 0; border-bottom: 2px solid #3c3c3c; padding-bottom: 5px;">${escapeHtml(trimmedLine.substring(2))}</h1>`;
+                continue;
+            }
+            if (trimmedLine.startsWith('## ')) {
+                if (inList) { html += `</${listType}>`; inList = false; listType = null; }
+                html += `<h2 style="color: #4EC9B0; font-size: 1.5em; margin: 18px 0 8px 0; border-bottom: 1px solid #3c3c3c; padding-bottom: 3px;">${escapeHtml(trimmedLine.substring(3))}</h2>`;
+                continue;
+            }
+            if (trimmedLine.startsWith('### ')) {
+                if (inList) { html += `</${listType}>`; inList = false; listType = null; }
+                html += `<h3 style="color: #4EC9B0; font-size: 1.2em; margin: 15px 0 6px 0;">${escapeHtml(trimmedLine.substring(4))}</h3>`;
+                continue;
+            }
+            if (trimmedLine.startsWith('#### ')) {
+                if (inList) { html += `</${listType}>`; inList = false; listType = null; }
+                html += `<h4 style="color: #4EC9B0; font-size: 1.1em; margin: 12px 0 5px 0;">${escapeHtml(trimmedLine.substring(5))}</h4>`;
+                continue;
+            }
+            
+            // 分隔线
+            if (trimmedLine.match(/^[\-\*_]{3,}$/)) {
+                if (inList) { html += `</${listType}>`; inList = false; listType = null; }
+                html += '<hr style="border: none; border-top: 1px solid #3c3c3c; margin: 15px 0;">';
+                continue;
+            }
+            
+            // 无序列表
+            if (trimmedLine.match(/^[\*\-\+]\s/)) {
+                if (inList && listType !== 'ul') {
+                    html += `</${listType}>`;
+                    inList = false;
+                }
+                if (!inList) {
+                    html += '<ul style="margin: 10px 0; padding-left: 25px;">';
+                    inList = true;
+                    listType = 'ul';
+                }
+                const listItem = trimmedLine.substring(2);
+                html += `<li style="margin: 5px 0;">${processInlineMarkdown(listItem)}</li>`;
+                continue;
+            }
+            
+            // 有序列表
+            if (trimmedLine.match(/^\d+\.\s/)) {
+                if (inList && listType !== 'ol') {
+                    html += `</${listType}>`;
+                    inList = false;
+                }
+                if (!inList) {
+                    html += '<ol style="margin: 10px 0; padding-left: 25px;">';
+                    inList = true;
+                    listType = 'ol';
+                }
+                const listItem = trimmedLine.replace(/^\d+\.\s/, '');
+                html += `<li style="margin: 5px 0;">${processInlineMarkdown(listItem)}</li>`;
+                continue;
+            }
+            
+            // 列表结束
+            if (inList && !trimmedLine) {
+                html += `</${listType}>`;
+                inList = false;
+                listType = null;
+            }
+            
+            // 引用
+            if (trimmedLine.startsWith('> ')) {
+                if (inList) { html += `</${listType}>`; inList = false; listType = null; }
+                html += `<blockquote style="border-left: 3px solid #007acc; padding-left: 15px; margin: 10px 0; color: #858585; font-style: italic;">${processInlineMarkdown(trimmedLine.substring(2))}</blockquote>`;
+                continue;
+            }
+            
+            // 普通段落
+            if (trimmedLine) {
+                if (inList) { html += `</${listType}>`; inList = false; listType = null; }
+                html += `<p style="margin: 8px 0;">${processInlineMarkdown(trimmedLine)}</p>`;
+            } else if (!inList) {
+                html += '<br>';
+            }
+        }
+        
+        if (inList) {
+            html += `</${listType}>`;
+        }
+        
+        html += '</div>';
+        return html;
+    }
+    
+    // 处理行内Markdown（粗体、斜体、代码、链接）
+    function processInlineMarkdown(text) {
+        if (!text) return '';
+        
+        // 先转义HTML，防止XSS
+        text = escapeHtml(text);
+        
+        // 代码（使用不同的转义策略）
+        text = text.replace(/`([^`]+)`/g, (match, code) => {
+            return `<code style="background: #252526; padding: 2px 6px; border-radius: 3px; color: #CE9178; font-family: monospace;">${code}</code>`;
+        });
+        
+        // 粗体
+        text = text.replace(/\*\*([^*]+)\*\*/g, '<strong style="font-weight: bold; color: #ffffff;">$1</strong>');
+        text = text.replace(/__([^_]+)__/g, '<strong style="font-weight: bold; color: #ffffff;">$1</strong>');
+        
+        // 斜体（避免与粗体冲突）
+        text = text.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, '<em style="font-style: italic;">$1</em>');
+        text = text.replace(/(?<!_)_([^_]+)_(?!_)/g, '<em style="font-style: italic;">$1</em>');
+        
+        // 链接
+        text = text.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" style="color: #4EC9B0; text-decoration: none; border-bottom: 1px solid #4EC9B0;">$1</a>');
+        
+        return text;
+    }
+
+    class TerminalInstance {
+        constructor(tabId, outputEl, promptEl, cmdEl, terminalElement = null, pid = null){
+            this.tabId = tabId;
+            this.outputEl = outputEl;
+            this.promptEl = promptEl;
+            this.cmdEl = cmdEl;
+            this.terminalElement = terminalElement; // 保存终端容器元素引用
+            this.pid = pid;  // 存储进程ID，用于标记DOM元素
+            this.isActive = false;
+            // 保存当前运行的 CLI 程序 PID（用于 Ctrl+C 中断）
+            this._currentCliPid = null;
+            
+            this.env = {
+                user: 'root',
+                host: 'test',
+                cwd: '~',
+            };
+
+            // 更新工作环境（在加载内存数据后，_loadTerminalDataFromMemory 会处理）
+
+            // 可配置项（可由外部修改）
+            this.config = {
+                fontFamily: "'DejaVu Sans Mono', 'Hack', monospace",
+                fontSize: 16,
+                resizable: true,
+                minWidth: 580,
+                minHeight: 340,
+                maxWidth: null, // null 表示根据视口计算
+                maxHeight: null,
+                scrollbarStyle: 'overlay', // 'overlay' or 'native'
+                promptTemplate: '\\u@\\h:\\w', // simple PS1-like template
+            };
+
+            // newest on top flag (Kali uses newest at bottom)
+            this.newestOnTop = false;
+
+            // 命令历史 - 现在存储在 Exploit 内存中
+            // this.history 和 this.historyIndex 将通过 getter/setter 访问内存
+
+            // 事件监听器 map: eventName -> [fn]
+            this._listeners = new Map();
+            
+            // 标记是否已注册命令处理器
+            this._commandHandlerRegistered = false;
+
+            // 向后兼容：可被外部替换的命令处理器（仍然保留）
+            // 推荐使用事件监听：Terminal.on('command', handler)
+            this.commandHandler = this._defaultHandler.bind(this);
+            // 用于 Tab 补全的已知命令列表（可由外部修改）
+            this._completionCommands = ['debug','clear','pwd','whoami','echo','demo','toggleview','cd','markdir','markfile','ls','tree','cat','write','rm','kill','help','check','diskmanger','rename','mv','copy','paste','power','exit','login','su','users','groups','groupadd','groupdel','groupmod','groupinfo','env','setenv','export','unsetenv','unset','getenv'];
+            
+            // CLI程序补全缓存（从ApplicationAssetManager获取）
+            this._cliProgramsCache = null;
+            this._cliProgramsCacheTime = 0;
+            this._cliProgramsCacheTTL = 5000; // 缓存5秒
+            
+            // D:/bin/ 目录程序补全缓存
+            this._binProgramsCache = null;
+            this._binProgramsCacheTime = 0;
+            this._binProgramsCacheTTL = 10000; // 缓存10秒（bin目录变化较少）
+            
+            // 剪贴板现在存储在 Exploit 内存中（PID 10000）
+            
+            // completion 状态：{ visible, candidates, index, beforeText, dirPart } - 现在存储在 Exploit 内存中
+            
+            // 从内存初始化终端数据
+            this._loadTerminalDataFromMemory();
+            
+            // 同步用户控制系统的当前用户
+            (async () => {
+                try {
+                    if (typeof UserControl !== 'undefined') {
+                        await UserControl.ensureInitialized();
+                        const currentUser = UserControl.getCurrentUser();
+                        if (currentUser && currentUser !== this.env.user) { 
+                            this.env.user = currentUser;
+                            this.setUser(currentUser);
+                        } else if (this.env.user && !currentUser) {
+                            // 如果用户控制系统没有当前用户，使用终端的用户
+                            await UserControl.login(this.env.user);
+                        }
+                    }
+                } catch (e) {
+                    // 如果初始化失败，至少确保终端有默认用户
+                    if (!this.env.user) {
+                        this.env.user = 'root';
+                        this.setUser('root');
+                    }
+                    // 忽略错误，不影响终端初始化
+                    KernelLogger.debug("Terminal", `同步用户控制系统失败: ${e.message}`);
+                }
+            })();
+            
+            // 为了保持向后兼容，创建 history 的 getter/setter
+            // 这些方法会将数据存储在 Exploit 内存中
+
+            // 初始化 UI
+            this._updatePrompt();
+            this._bindEvents();
+            // 初始化控制点绑定与拖拽（每个实例都需要绑定自己的窗口控制）
+            this._bindWindowControls();
+            this._bindResizer();
+            
+            // 显示欢迎词（仅在第一个标签页时显示）
+            // tabId格式为: tab-${pid}-${counter} 或 tab-${counter}
+            // 第一个标签页的counter是1，所以检查tabId是否以"-1"结尾或以"tab-1"开头
+            const isFirstTab = tabId.endsWith('-1') || tabId === 'tab-1' || /^tab-\d+-1$/.test(tabId);
+            if (isFirstTab) {
+                setTimeout(() => {
+                    this._showWelcomeMessage();
+                }, 100);
+            }
+        }
+        
+        // 显示欢迎消息（纯文本版本信息）
+        _showWelcomeMessage() {
+            // 获取终端程序信息
+            let terminalInfo = null;
+            if (typeof TERMINAL !== 'undefined' && typeof TERMINAL.__info__ === 'function') {
+                try {
+                    terminalInfo = TERMINAL.__info__();
+                } catch (e) {
+                    // 忽略错误
+                }
+            }
+            
+            // 默认信息
+            const version = terminalInfo?.version || '1.0.0';
+            const description = terminalInfo?.description || 'ZerOS Bash风格终端';
+            const author = terminalInfo?.author || 'ZerOS Team';
+            const copyright = terminalInfo?.copyright || '© 2025 ZerOS';
+            
+            // 简单的纯文本欢迎信息
+            const welcomeText = [
+                `ZerOS Terminal ${version}`,
+                description,
+                `${author} - ${copyright}`,
+                '',
+                'Type "help" for command list.'
+            ];
+            
+            welcomeText.forEach(line => {
+                this.write(line);
+            });
+        }
+        
+        _setActive(active) {
+            const wasActive = this.isActive;
+            this.isActive = active;
+            
+            if (active) {
+                // 获取bash-window元素
+                const bashWindow = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+                
+                // 移除所有其他窗口的焦点状态
+                if (bashWindow) {
+                    // 找到所有bash-window，移除它们的focused类
+                    const allWindows = document.querySelectorAll('.bash-window');
+                    allWindows.forEach(win => {
+                        if (win !== bashWindow) {
+                            win.classList.remove('focused');
+                        }
+                    });
+                    
+                    // 为当前窗口添加focused类
+                    bashWindow.classList.add('focused');
+                }
+                
+                // 更新终端元素的 active 类
+                if (this.terminalElement) {
+                    this.terminalElement.classList.add('active');
+                }
+                
+                // 确保输入框已启用（只有在非 busy 状态下才显示）
+                if (this.cmdEl) {
+                    this.cmdEl.setAttribute('tabindex', '0');
+                    // 只有在非 busy 状态下才启用输入框
+                    if (!this.busy) {
+                        // 显示整个输入行
+                        if (this.inputLineEl) {
+                            this.inputLineEl.style.display = '';
+                        } else {
+                            this.cmdEl.style.display = '';
+                            if (this.promptEl) {
+                                this.promptEl.style.display = '';
+                            }
+                        }
+                        this.cmdEl.setAttribute('contenteditable', 'true');
+                    } else {
+                        // busy 状态下保持隐藏
+                        if (this.inputLineEl) {
+                            this.inputLineEl.style.display = 'none';
+                        } else {
+                            this.cmdEl.style.display = 'none';
+                            if (this.promptEl) {
+                                this.promptEl.style.display = 'none';
+                            }
+                        }
+                        this.cmdEl.setAttribute('contenteditable', 'false');
+                    }
+                }
+                
+                // 延迟获取焦点，确保 DOM 已更新且元素可见
+                requestAnimationFrame(() => {
+                    if (this.isActive && this.terminalElement && this.terminalElement.classList.contains('active')) {
+                        // 再次延迟，确保 CSS 过渡完成
+                        setTimeout(() => {
+                            if (this.isActive && !this.busy) {
+                                // 确保输入框可见且可聚焦，并且已启用
+                                if (this.cmdEl && 
+                                    this.cmdEl.offsetParent !== null && 
+                                    this.cmdEl.getAttribute('contenteditable') === 'true' &&
+                                    this.cmdEl.getAttribute('tabindex') !== '-1') {
+                                    this.focus();
+                                } else {
+                                    // 如果不可见，再延迟一次
+                                    setTimeout(() => {
+                                        if (this.isActive && 
+                                            !this.busy && 
+                                            this.cmdEl && 
+                                            this.cmdEl.offsetParent !== null &&
+                                            this.cmdEl.getAttribute('contenteditable') === 'true' &&
+                                            this.cmdEl.getAttribute('tabindex') !== '-1') {
+                                            this.focus();
+                                        }
+                                    }, 100);
+                                }
+                            }
+                        }, 50);
+                    }
+                });
+            } else {
+                // 获取bash-window元素
+                const bashWindow = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+                
+                // 移除焦点状态
+                if (bashWindow) {
+                    bashWindow.classList.remove('focused');
+                }
+                
+                // 更新终端元素的 active 类
+                if (this.terminalElement) {
+                    this.terminalElement.classList.remove('active');
+                }
+                
+                // 失去焦点时，强制移除焦点并禁用输入框
+                if (this.cmdEl) {
+                    // 如果当前焦点在这个输入框上，先移除焦点
+                    if (document.activeElement === this.cmdEl) {
+                        this.cmdEl.blur();
+                    }
+                    // 确保输入框被禁用
+                    this.cmdEl.setAttribute('tabindex', '-1');
+                    this.cmdEl.setAttribute('contenteditable', 'false');
+                    this.cmdEl.classList.remove('focused');
+                }
+            }
+        }
+
+        _updatePrompt(){
+            // Kali style: root prompt ends with '#', 管理员也使用 '#'
+            // 检查用户级别（如果 UserControl 可用）
+            let isAdmin = false;
+            if (typeof UserControl !== 'undefined' && this.env.user) {
+                try {
+                    const userLevel = UserControl.getCurrentUserLevel();
+                    isAdmin = userLevel === UserControl.USER_LEVEL.ADMIN || 
+                             userLevel === UserControl.USER_LEVEL.DEFAULT_ADMIN;
+                } catch (e) {
+                    // 忽略错误，使用默认逻辑
+                }
+            }
+            const suffix = (this.env.user === 'root' || isAdmin) ? '#' : '$';
+            // support simple promptTemplate \u= user, \h=host, \w=cwd
+            let tmpl = this.config && this.config.promptTemplate ? this.config.promptTemplate : '\\u@\\h:\\w';
+            tmpl = tmpl.replace('\\u', this.env.user || 'root').replace('\\h', this.env.host || 'test').replace('\\w', this.env.cwd || '~');
+            this.promptEl.textContent = tmpl + suffix;
+        }
+
+        _bindEvents(){
+            // 使用 EventManager 注册事件
+            if (typeof EventManager !== 'undefined' && this.pid) {
+                // 将焦点放到可编辑元素
+                const cmdElId = `terminal-cmd-el-${this.tabId}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                this.cmdEl.dataset.eventId = cmdElId;
+                EventManager.registerEventHandler(this.pid, 'click', (e) => {
+                    if (this.cmdEl === e.target || this.cmdEl.contains(e.target)) {
+                        e.stopPropagation();
+                        // 如果点击的是非活动标签页，先切换到该标签页
+                        if (!this.isActive) {
+                            if (typeof tabManager !== 'undefined' && tabManager) {
+                                tabManager.switchTab(this.tabId);
+                                // 延迟获取焦点，确保标签页切换完成
+                                setTimeout(() => {
+                                    if (this.isActive && this.cmdEl && 
+                                        this.cmdEl.getAttribute('contenteditable') === 'true') {
+                                        this.focus();
+                                    }
+                                }, 100);
+                                return;
+                            }
+                        }
+                        // 如果是活动标签页，直接获取焦点
+                        if (this.isActive && 
+                            this.cmdEl.getAttribute('contenteditable') === 'true' &&
+                            this.cmdEl.getAttribute('tabindex') !== '-1') {
+                            this.focus();
+                        }
+                    }
+                }, {
+                    priority: 100,
+                    selector: `[data-event-id="${cmdElId}"]`
+                });
+                
+                // 监听焦点事件（使用 registerElementEvent）
+                EventManager.registerElementEvent(this.pid, this.cmdEl, 'focus', () => {
+                    // 只有活动标签页的输入框才能获得焦点
+                    if (this.isActive && 
+                        this.cmdEl.getAttribute('contenteditable') === 'true' &&
+                        this.cmdEl.getAttribute('tabindex') !== '-1') {
+                        this.cmdEl.classList.add('focused');
+                    } else {
+                        // 如果非活动标签页的输入框获得了焦点，立即移除焦点
+                        this.cmdEl.blur();
+                    }
+                });
+                EventManager.registerElementEvent(this.pid, this.cmdEl, 'blur', () => {
+                    this.cmdEl.classList.remove('focused');
+                });
+            } else {
+                // 降级方案
+                // 将焦点放到可编辑元素
+                this.cmdEl.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (!this.isActive) {
+                        if (typeof tabManager !== 'undefined' && tabManager) {
+                            tabManager.switchTab(this.tabId);
+                            return;
+                        }
+                    }
+                    this.focus();
+                });
+                
+                // 监听焦点事件
+                this.cmdEl.addEventListener('focus', () => {
+                    this.cmdEl.classList.add('focused');
+                });
+                this.cmdEl.addEventListener('blur', () => {
+                    this.cmdEl.classList.remove('focused');
+                });
+            }
+            
+            // 当终端实例变为可见时，如果是活动标签页，自动获取焦点
+            if (this.terminalElement) {
+                const observer = new MutationObserver(() => {
+                    if (this.isActive && this.terminalElement && this.terminalElement.classList.contains('active')) {
+                        // 延迟获取焦点，确保动画完成
+                        setTimeout(() => {
+                            if (this.isActive && document.activeElement !== this.cmdEl && !this.busy) {
+                                this.focus();
+                            }
+                        }, 100);
+                    }
+                });
+                
+                // 观察终端实例的 class 变化
+                observer.observe(this.terminalElement, {
+                    attributes: true,
+                    attributeFilter: ['class']
+                });
+            }
+            
+            // 添加全局点击事件，点击终端窗口时聚焦到活动标签页
+            // 为每个实例注册（支持多实例）
+            const bashWindow = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+            
+            // 为bash-window添加点击事件（每个实例独立，使用 EventManager）
+            if (bashWindow && !bashWindow._terminalClickHandlerRegistered) {
+                bashWindow._terminalClickHandlerRegistered = true;
+                if (typeof EventManager !== 'undefined' && this.pid) {
+                    const bashWindowClickId = `terminal-bash-window-click-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    bashWindow.dataset.eventId = bashWindowClickId;
+                    EventManager.registerEventHandler(this.pid, 'click', (e) => {
+                        // 检查事件目标是否在 bashWindow 内（选择器已经确保这一点，但双重检查更安全）
+                        if (bashWindow === e.target || bashWindow.contains(e.target)) {
+                            // 如果点击的不是输入框、按钮、链接、标签页或窗口控制按钮，聚焦到活动标签页
+                            const target = e.target;
+                            if (!target.closest('.cmd') && 
+                                !target.closest('button') && 
+                                !target.closest('a') &&
+                                !target.closest('.dot') &&
+                                !target.closest('.window-resizer') &&
+                                !target.closest('.tab')) {
+                                // 确保窗口获得焦点状态
+                                const allWindows = document.querySelectorAll('.bash-window');
+                                allWindows.forEach(win => {
+                                    win.classList.remove('focused');
+                                });
+                                bashWindow.classList.add('focused');
+                                
+                                // 获取活动标签页的终端实例
+                                if (typeof tabManager !== 'undefined' && tabManager) {
+                                    const activeTerminal = tabManager.getActiveTerminal();
+                                    if (activeTerminal && activeTerminal.isActive && !activeTerminal.busy) {
+                                        setTimeout(() => {
+                                            if (activeTerminal.isActive && 
+                                                activeTerminal.cmdEl &&
+                                                activeTerminal.cmdEl.getAttribute('contenteditable') === 'true' &&
+                                                activeTerminal.cmdEl.getAttribute('tabindex') !== '-1') {
+                                                activeTerminal.focus();
+                                            }
+                                        }, 50);
+                                    }
+                                }
+                            }
+                        }
+                    }, {
+                        priority: 100,
+                        selector: `[data-event-id="${bashWindowClickId}"]`,
+                        useCapture: false  // 改为 false，使用冒泡阶段，确保能捕获到子元素的事件
+                    });
+                } else {
+                    // 降级方案
+                    bashWindow.addEventListener('click', (e) => {
+                        const target = e.target;
+                        if (!target.closest('.cmd') && 
+                            !target.closest('button') && 
+                            !target.closest('a') &&
+                            !target.closest('.dot') &&
+                            !target.closest('.window-resizer') &&
+                            !target.closest('.tab')) {
+                            const allWindows = document.querySelectorAll('.bash-window');
+                            allWindows.forEach(win => {
+                                win.classList.remove('focused');
+                            });
+                            bashWindow.classList.add('focused');
+                            
+                            if (!this.isActive) {
+                                // 逻辑已在 cmdEl 的 click 事件中处理
+                            }
+                            
+                            setTimeout(() => {
+                                if (this.isActive && !this.busy) {
+                                    this.focus();
+                                }
+                            }, 50);
+                        }
+                    }, true);
+                }
+            }
+            
+            // 监听窗口焦点事件（当浏览器窗口重新获得焦点时）
+            // 使用 EventManager 注册窗口焦点事件（全局只注册一次）
+            if (!window._terminalWindowFocusHandler && typeof EventManager !== 'undefined') {
+                const exploitPid = typeof ProcessManager !== 'undefined' ? ProcessManager.EXPLOIT_PID : 10000;
+                window._terminalWindowFocusHandler = EventManager.registerEventHandler(exploitPid, 'focus', () => {
+                    // 延迟检查，确保窗口完全获得焦点
+                    setTimeout(() => {
+                        const activeTerminal = tabManager ? tabManager.getActiveTerminal() : null;
+                        if (activeTerminal && activeTerminal.isActive && !activeTerminal.busy) {
+                            // 如果当前没有焦点在输入框上，自动聚焦
+                            if (document.activeElement !== activeTerminal.cmdEl) {
+                                activeTerminal.focus();
+                            }
+                        }
+                    }, 100);
+                }, {
+                    priority: 100,
+                    selector: null  // 监听 window 的 focus 事件
+                });
+            }
+
+            // 使用 EventManager 注册键盘事件
+            if (typeof EventManager !== 'undefined' && this.pid) {
+                EventManager.registerEventHandler(this.pid, 'keydown', (ev) => {
+                    // 只在活动标签页时处理键盘事件
+                    if (!this.isActive) {
+                        // 检查事件是否发生在 cmdEl 内（非活动标签页只在 cmdEl 内处理）
+                        if (this.cmdEl === ev.target || this.cmdEl.contains(ev.target)) {
+                            // 如果非活动标签页的输入框获得了焦点，阻止事件并切换到该标签页
+                            if (ev.target === this.cmdEl || this.cmdEl.contains(ev.target)) {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                if (typeof tabManager !== 'undefined' && tabManager) {
+                                    tabManager.switchTab(this.tabId);
+                                    // 延迟获取焦点，确保标签页切换完成
+                                    setTimeout(() => {
+                                        if (this.isActive && this.cmdEl) {
+                                            this.focus();
+                                        }
+                                    }, 50);
+                                }
+                            }
+                        }
+                        return;
+                    }
+                    
+                    // 活动标签页：处理快捷键（Ctrl+C 等），即使在输入框被隐藏时也要处理
+                    if (ev.ctrlKey || ev.metaKey) {
+                        // Ctrl+C: 取消当前命令（在 busy 状态下也需要处理）
+                        if (ev.key === 'c' || ev.key === 'C') {
+                            if (this.busy) {
+                                ev.preventDefault();
+                                ev.stopPropagation();
+                                this.cancelCurrent();
+                                // 尝试聚焦输入框（即使被隐藏）
+                                if (this.cmdEl) {
+                                    this.cmdEl.focus();
+                                }
+                                return;
+                            }
+                        }
+                    }
+                    
+                    // 检查事件是否发生在 cmdEl 内（普通输入需要）
+                    if (this.cmdEl !== ev.target && !this.cmdEl.contains(ev.target)) {
+                        return;
+                    }
+                    
+                    // 键盘快捷键支持（在检查 contenteditable 之前处理，允许在 busy 状态下使用）
+                    if (ev.ctrlKey || ev.metaKey) {
+                        // Ctrl+L 或 Cmd+L: 清屏
+                        if (ev.key === 'l' || ev.key === 'L') {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            this.clear();
+                            this.focus();
+                            return;
+                        }
+                    }
+                    
+                    // 额外检查：确保输入框是可编辑的（活动标签页）
+                    // 注意：Ctrl+C 等快捷键已经在上面处理，这里只检查普通输入
+                    if (this.cmdEl.getAttribute('contenteditable') !== 'true' || 
+                        this.cmdEl.getAttribute('tabindex') === '-1') {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        return;
+                    }
+                
+                // 键盘快捷键支持
+                if (ev.ctrlKey || ev.metaKey) {
+                    // Ctrl+L 或 Cmd+L: 清屏
+                    if (ev.key === 'l' || ev.key === 'L') {
+                        ev.preventDefault();
+                        this.clear();
+                        this.focus();
+                        return;
+                    }
+                    // Ctrl+C: 取消当前命令（如果正在执行）
+                    if (ev.key === 'c' || ev.key === 'C') {
+                        if (this.busy) {
+                            ev.preventDefault();
+                            this.cancelCurrent();
+                            this.focus();
+                            return;
+                        }
+                    }
+                    // Ctrl+U: 清空当前输入
+                    if (ev.key === 'u' || ev.key === 'U') {
+                        ev.preventDefault();
+                        this.cmdEl.textContent = '';
+                        this.focus();
+                        return;
+                    }
+                    // Ctrl+K: 删除光标到行尾
+                    if (ev.key === 'k' || ev.key === 'K') {
+                        ev.preventDefault();
+                        const text = this.cmdEl.textContent;
+                        const selection = window.getSelection();
+                        if (selection.rangeCount > 0) {
+                            const range = selection.getRangeAt(0);
+                            const startOffset = range.startOffset;
+                            this.cmdEl.textContent = text.substring(0, startOffset);
+                            this.focus();
+                        }
+                        return;
+                    }
+                    // Ctrl+A: 全选（移动到行首）
+                    if (ev.key === 'a' || ev.key === 'A') {
+                        ev.preventDefault();
+                        const range = document.createRange();
+                        range.selectNodeContents(this.cmdEl);
+                        range.collapse(true); // 移动到开头
+                        const sel = window.getSelection();
+                        sel.removeAllRanges();
+                        sel.addRange(range);
+                        return;
+                    }
+                    // Ctrl+E: 执行 exit 命令
+                    if (ev.key === 'e' || ev.key === 'E') {
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                        // 执行 exit 命令
+                        const payload = {
+                            cmdString: 'exit',
+                            args: ['exit'],
+                            env: this.env,
+                            write: this.write.bind(this),
+                            done: () => {}
+                        };
+                        this._handleCommand(payload).catch((err) => {
+                            this.write('Error while handling exit command: ' + (err && err.message ? err.message : String(err)));
+                        });
+                        return;
+                    }
+                }
+                
+                // 历史导航
+                if(ev.key === 'ArrowUp'){
+                    ev.preventDefault();
+                    if(this.history.length === 0) return;
+                    if(this.historyIndex === -1) this.historyIndex = this.history.length - 1;
+                    else this.historyIndex = Math.max(0, this.historyIndex - 1);
+                    this.cmdEl.textContent = this.history[this.historyIndex] || '';
+                    this.focus();
+                    return;
+                }
+                if(ev.key === 'ArrowDown'){
+                    ev.preventDefault();
+                    if(this.history.length === 0) return;
+                    if(this.historyIndex === -1) return;
+                    this.historyIndex = this.historyIndex + 1;
+                    if(this.historyIndex >= this.history.length){
+                        this.historyIndex = -1;
+                        this.cmdEl.textContent = '';
+                    }else{
+                        this.cmdEl.textContent = this.history[this.historyIndex] || '';
+                    }
+                    this.focus();
+                    return;
+                }
+
+                if(ev.key === 'Enter'){
+                    ev.preventDefault();
+                    // 只在活动标签页处理 Enter 键
+                    if (!this.isActive) return;
+                    
+                    if(this.busy){
+                        this.write('Previous command still running - please wait...');
+                        return;
+                    }
+                    const raw = this.cmdEl.textContent.replace(/\u00A0/g,' ');
+                    const input = raw.replace(/\n/g,'').trim();
+                    // 如果输入非空，加入历史
+                    if(input){
+                        const hist = this.history;
+                        hist.push(input);
+                        this.history = hist; // 触发保存
+                    }
+                    this.historyIndex = -1;
+                    // 回显
+                    this._echoCommand(input);
+                    // 清空输入
+                    this.cmdEl.textContent = '';
+                    // 标记为忙，禁止输入
+                    this._setBusy(true);
+                    // 处理命令（事件驱动或向后兼容 handler），支持异步 Promise
+                    const payload = {
+                        cmdString: input,
+                        args: this._argsFrom(input),
+                        env: this.env,
+                        write: this.write.bind(this),
+                        done: () => {}
+                    };
+                    this._handleCommand(payload).then(() => {
+                        this._setBusy(false);
+                    }).catch((err) => {
+                        this.write('Error while handling command: ' + (err && err.message ? err.message : String(err)));
+                        this._setBusy(false);
+                    });
+                }
+                // Ctrl shortcuts
+                if(ev.ctrlKey && ev.key === 'c'){
+                    ev.preventDefault();
+                    // cancel
+                    this.cancelCurrent();
+                    return;
+                }
+                if(ev.ctrlKey && ev.key === 'l'){
+                    ev.preventDefault();
+                    this.clear();
+                    return;
+                }
+                if(ev.ctrlKey && ev.key === 'd'){
+                    ev.preventDefault();
+                    // emulate EOF: if input empty, maybe close; here just write message
+                    const raw = this.cmdEl.textContent.replace(/\u00A0/g,' ');
+                    const input = raw.replace(/\n/g,'').trim();
+                    if(!input) this.write('logout');
+                    return;
+                }
+                // Tab 补全和候选选择支持
+                if(ev.key === 'Tab'){
+                    ev.preventDefault();
+                    // 如果补全面板已经可见，Tab/Shift+Tab 在候选之间循环并更新输入
+                    if(this._completionState && this._completionState.visible){
+                        if(ev.shiftKey) this._moveCompletion(-1);
+                        else this._moveCompletion(1);
+                        const cand = this._completionState.candidates[this._completionState.index];
+                        if(typeof cand !== 'undefined'){
+                            const before = this._completionState.beforeText || '';
+                            let newText = before;
+                            if(newText.length && !/\s$/.test(newText)) newText += ' ';
+                            newText += cand;
+                            this.cmdEl.textContent = newText;
+                            this._renderCompletions();
+                            this.focus();
+                        }
+                        return;
+                    }
+
+                    const raw = this.cmdEl.textContent.replace(/\u00A0/g,' ').replace(/\n/g,'');
+                    const m = raw.match(/(?:^|\s)(\S*)$/);
+                    const token = (m && m[1]) ? m[1] : '';
+                    const before = raw.slice(0, raw.length - token.length);
+                    const isFirstToken = before.trim().length === 0;
+
+                    // 异步获取候选（因为需要从 PHP 服务获取目录列表）
+                    (async () => {
+                        let candidates = [];
+                        let dirPart = '';
+                        try{
+                            if(isFirstToken){
+                                // 从内置命令列表获取候选
+                                candidates = this._completionCommands.filter(c => c.indexOf(token) === 0);
+                                
+                                // 从ApplicationAssetManager获取所有程序（包括CLI和GUI）并添加到候选列表
+                                try {
+                                    let AssetManager = null;
+                                    if (typeof ApplicationAssetManager !== 'undefined') {
+                                        AssetManager = ApplicationAssetManager;
+                                    } else if (typeof safePoolGet === 'function') {
+                                        AssetManager = safePoolGet('KERNEL_GLOBAL_POOL', 'ApplicationAssetManager');
+                                    } else if (typeof safeGetPool === 'function') {
+                                        const pool = safeGetPool();
+                                        if (pool && typeof pool.__GET__ === 'function') {
+                                            AssetManager = pool.__GET__('KERNEL_GLOBAL_POOL', 'ApplicationAssetManager');
+                                        }
+                                    }
+                                    
+                                    if (AssetManager && typeof AssetManager.listPrograms === 'function') {
+                                        const allPrograms = AssetManager.listPrograms();
+                                        
+                                        // 过滤匹配token的所有程序（包括CLI和GUI）
+                                        const matchingPrograms = allPrograms.filter(p => {
+                                            // 检查程序名是否匹配token（不区分大小写）
+                                            const programNameLower = p.toLowerCase();
+                                            const tokenLower = token.toLowerCase();
+                                            if (programNameLower.indexOf(tokenLower) !== 0) return false;
+                                            
+                                            // 对于terminal程序，总是包含（即使它是GUI程序）
+                                            if (programNameLower === 'terminal') return true;
+                                            
+                                            // 对于其他程序，检查是否为CLI程序
+                                            try {
+                                                const programInfo = AssetManager.getProgramInfo(p);
+                                                if (programInfo) {
+                                                    // 检查metadata中的type
+                                                    if (programInfo.metadata && programInfo.metadata.type === 'CLI') {
+                                                        return true;
+                                                    }
+                                                    // 检查顶层type
+                                                    if (programInfo.type === 'CLI') {
+                                                        return true;
+                                                    }
+                                                }
+                                                
+                                                // 如果ApplicationAssetManager没有类型信息，尝试从程序对象获取
+                                                const programNameUpper = p.toUpperCase();
+                                                let programClass = null;
+                                                if (typeof window !== 'undefined' && window[programNameUpper]) {
+                                                    programClass = window[programNameUpper];
+                                                } else if (typeof globalThis !== 'undefined' && globalThis[programNameUpper]) {
+                                                    programClass = globalThis[programNameUpper];
+                                                }
+                                                
+                                                if (programClass && typeof programClass.__info__ === 'function') {
+                                                    try {
+                                                        const info = programClass.__info__();
+                                                        if (info && (info.type === 'CLI' || (info.metadata && info.metadata.type === 'CLI'))) {
+                                                            return true;
+                                                        }
+                                                    } catch (e) {
+                                                        // 忽略错误
+                                                    }
+                                                }
+                                            } catch (e) {
+                                                // 忽略单个程序的错误
+                                            }
+                                            
+                                            return false;
+                                        });
+                                        
+                                        // 合并到候选列表（去重）
+                                        const existingSet = new Set(candidates);
+                                        matchingPrograms.forEach(p => {
+                                            if (!existingSet.has(p)) {
+                                                candidates.push(p);
+                                                existingSet.add(p);
+                                            }
+                                        });
+                                    }
+                                } catch (e) {
+                                    // 如果获取程序失败，忽略错误，继续使用内置命令列表
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.warn('Terminal', 'Failed to get programs for completion', e);
+                                    }
+                                }
+                                
+                                // 从 D:/bin/ 目录获取程序并添加到候选列表
+                                try {
+                                    const binPrograms = await this._getBinProgramsForCompletion();
+                                    const tokenLower = token.toLowerCase();
+                                    
+                                    // 过滤匹配token的程序
+                                    const matchingBinPrograms = binPrograms.filter(p => {
+                                        const programNameLower = p.toLowerCase();
+                                        return programNameLower.indexOf(tokenLower) === 0;
+                                    });
+                                    
+                                    // 合并到候选列表（去重）
+                                    const existingSet = new Set(candidates);
+                                    matchingBinPrograms.forEach(p => {
+                                        if (!existingSet.has(p)) {
+                                            candidates.push(p);
+                                            existingSet.add(p);
+                                        }
+                                    });
+                                } catch (e) {
+                                    // 如果获取 bin 目录程序失败，忽略错误
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.warn('Terminal', 'Failed to get bin programs for completion', e);
+                                    }
+                                }
+                                
+                                // 按字母顺序排序
+                                candidates.sort();
+                            }else{
+                                // 异步从 PHP 服务获取目录列表
+                                const idx = token.lastIndexOf('/');
+                                dirPart = idx >= 0 ? token.slice(0, idx + 1) : '';
+                                const namePrefix = idx >= 0 ? token.slice(idx + 1) : token;
+                                const dirToList = resolvePath(this.env.cwd, dirPart || '.');
+                                
+                                // 确保路径格式正确
+                                let phpPath = dirToList;
+                                if (/^[A-Z]:$/.test(phpPath)) {
+                                    phpPath = phpPath + '/';
+                                }
+                                
+                                // 从 PHP 服务获取目录列表
+                                const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                    ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                    : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                        ? SystemInformation.getOrigin()
+                                        : window.location.origin);
+                                url.searchParams.set('action', 'list_dir');
+                                url.searchParams.set('path', phpPath);
+                                
+                                try {
+                                    const response = await fetch(url.toString());
+                                    if (response.ok) {
+                                        const result = await response.json();
+                                        if (result.status === 'success' && result.data && result.data.items) {
+                                            const items = result.data.items;
+                                            const nodes = items.filter(item => item.type === 'directory').map(item => item.name + '/');
+                                            const files = items.filter(item => item.type === 'file').map(item => item.name);
+                                            candidates = nodes.concat(files).filter(n => n.indexOf(namePrefix) === 0).map(n => dirPart + n);
+                                        }
+                                    }
+                                } catch (e) {
+                                    candidates = [];
+                                }
+                            }
+                        }catch(e){ candidates = []; }
+
+                        if(candidates.length === 0){
+                            // 清除任何已显示的面板
+                            this._clearCompletions();
+                            return;
+                        }
+
+                        if(candidates.length === 1){
+                            // 单候选：直接替换输入
+                            const completion = candidates[0];
+                            let newText = before;
+                            if(newText.length && !/\s$/.test(newText)) newText += ' ';
+                            newText += completion;
+                            this.cmdEl.textContent = newText;
+                            this.focus();
+                            this._clearCompletions();
+                            return;
+                        }
+
+                        // 多候选：显示面板并进入选择模式
+                        this._showCompletions(candidates, before, dirPart);
+                    })();
+                    return;
+                }
+
+                // 在候选面板可见时，拦截上下/Enter/Escape
+                if(this._completionState.visible){
+                    if(ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter' || ev.key === 'Escape'){
+                        ev.preventDefault();
+                        // 处理选择导航
+                        if(ev.key === 'ArrowDown'){
+                            this._moveCompletion(1);
+                            return;
+                        }else if(ev.key === 'ArrowUp'){
+                            this._moveCompletion(-1);
+                            return;
+                        }else if(ev.key === 'Enter'){
+                            // 接受补全后，继续执行命令（不返回，让事件继续处理）
+                            this._acceptCompletion();
+                            // 注意：不返回，让 Enter 键的后续处理逻辑执行命令
+                        }else if(ev.key === 'Escape'){
+                            this._clearCompletions();
+                            return;
+                        }
+                        // Enter 键继续执行，不返回
+                    }else{
+                        // 若用户继续输入其他字符，则关闭面板
+                        // Allow normal typing to proceed — but clear completions
+                        if(ev.key.length === 1 || ev.key === 'Backspace' || ev.key === 'Delete'){ this._clearCompletions(); }
+                    }
+                }
+                // Allow simple navigation keys normally (no extra features)
+                }, {
+                    priority: 100,
+                    selector: null  // 全局键盘事件
+                });
+            } else {
+                // 降级方案：使用原生 addEventListener
+                // 注意：降级方案需要包含完整的键盘事件处理逻辑
+                // 为了代码简洁，这里直接使用原有的 addEventListener
+                // 如果 EventManager 不可用，终端仍可正常工作
+                this.cmdEl.addEventListener('keydown', (ev) => {
+                    // 只在活动标签页时处理键盘事件
+                    if (!this.isActive) return;
+                    
+                    // 键盘快捷键支持
+                    if (ev.ctrlKey || ev.metaKey) {
+                        // Ctrl+L 或 Cmd+L: 清屏
+                        if (ev.key === 'l' || ev.key === 'L') {
+                            ev.preventDefault();
+                            this.clear();
+                            this.focus();
+                            return;
+                        }
+                        // Ctrl+C: 取消当前命令（如果正在执行）
+                        if (ev.key === 'c' || ev.key === 'C') {
+                            if (this.busy) {
+                                ev.preventDefault();
+                                this.cancelCurrent();
+                                this.focus();
+                                return;
+                            }
+                        }
+                        // Ctrl+U: 清空当前输入
+                        if (ev.key === 'u' || ev.key === 'U') {
+                            ev.preventDefault();
+                            this.cmdEl.textContent = '';
+                            this.focus();
+                            return;
+                        }
+                        // Ctrl+K: 删除光标到行尾
+                        if (ev.key === 'k' || ev.key === 'K') {
+                            ev.preventDefault();
+                            const text = this.cmdEl.textContent;
+                            const selection = window.getSelection();
+                            if (selection.rangeCount > 0) {
+                                const range = selection.getRangeAt(0);
+                                const startOffset = range.startOffset;
+                                this.cmdEl.textContent = text.substring(0, startOffset);
+                                this.focus();
+                            }
+                            return;
+                        }
+                        // Ctrl+A: 全选（移动到行首）
+                        if (ev.key === 'a' || ev.key === 'A') {
+                            ev.preventDefault();
+                            const range = document.createRange();
+                            range.selectNodeContents(this.cmdEl);
+                            range.collapse(true); // 移动到开头
+                            const sel = window.getSelection();
+                            sel.removeAllRanges();
+                            sel.addRange(range);
+                            return;
+                        }
+                        // Ctrl+E: 执行 exit 命令
+                        if (ev.key === 'e' || ev.key === 'E') {
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                            // 执行 exit 命令
+                            const payload = {
+                                cmdString: 'exit',
+                                args: ['exit'],
+                                env: this.env,
+                                write: this.write.bind(this),
+                                done: () => {}
+                            };
+                            this._handleCommand(payload).catch((err) => {
+                                this.write('Error while handling exit command: ' + (err && err.message ? err.message : String(err)));
+                            });
+                            return;
+                        }
+                    }
+                    
+                    // 历史导航
+                    if(ev.key === 'ArrowUp'){
+                        ev.preventDefault();
+                        if(this.history.length === 0) return;
+                        if(this.historyIndex === -1) this.historyIndex = this.history.length - 1;
+                        else this.historyIndex = Math.max(0, this.historyIndex - 1);
+                        this.cmdEl.textContent = this.history[this.historyIndex] || '';
+                        this.focus();
+                        return;
+                    }
+                    if(ev.key === 'ArrowDown'){
+                        ev.preventDefault();
+                        if(this.history.length === 0) return;
+                        if(this.historyIndex === -1) return;
+                        this.historyIndex = this.historyIndex + 1;
+                        if(this.historyIndex >= this.history.length){
+                            this.historyIndex = -1;
+                            this.cmdEl.textContent = '';
+                        }else{
+                            this.cmdEl.textContent = this.history[this.historyIndex] || '';
+                        }
+                        this.focus();
+                        return;
+                    }
+
+                    if(ev.key === 'Enter'){
+                        ev.preventDefault();
+                        // 只在活动标签页处理 Enter 键
+                        if (!this.isActive) return;
+                        
+                        if(this.busy){
+                            this.write('Previous command still running - please wait...');
+                            return;
+                        }
+                        const raw = this.cmdEl.textContent.replace(/\u00A0/g,' ');
+                        const input = raw.replace(/\n/g,'').trim();
+                        // 如果输入非空，加入历史
+                        if(input){
+                            const hist = this.history;
+                            hist.push(input);
+                            this.history = hist; // 触发保存
+                        }
+                        this.historyIndex = -1;
+                        // 回显
+                        this._echoCommand(input);
+                        // 清空输入
+                        this.cmdEl.textContent = '';
+                        // 标记为忙，禁止输入
+                        this._setBusy(true);
+                        // 处理命令（事件驱动或向后兼容 handler），支持异步 Promise
+                        const payload = {
+                            cmdString: input,
+                            args: this._argsFrom(input),
+                            env: this.env,
+                            write: this.write.bind(this),
+                            done: () => {}
+                        };
+                        this._handleCommand(payload).then(() => {
+                            this._setBusy(false);
+                        }).catch((err) => {
+                            this.write('Error while handling command: ' + (err && err.message ? err.message : String(err)));
+                            this._setBusy(false);
+                        });
+                    }
+                    // Ctrl shortcuts
+                    if(ev.ctrlKey && ev.key === 'c'){
+                        ev.preventDefault();
+                        // cancel
+                        this.cancelCurrent();
+                        return;
+                    }
+                    if(ev.ctrlKey && ev.key === 'l'){
+                        ev.preventDefault();
+                        this.clear();
+                        return;
+                    }
+                    if(ev.ctrlKey && ev.key === 'd'){
+                        ev.preventDefault();
+                        // emulate EOF: if input empty, maybe close; here just write message
+                        const raw = this.cmdEl.textContent.replace(/\u00A0/g,' ');
+                        const input = raw.replace(/\n/g,'').trim();
+                        if(!input) this.write('logout');
+                        return;
+                    }
+                    // Tab 补全和候选选择支持（简化版本，完整逻辑在 EventManager 版本中）
+                    if(ev.key === 'Tab'){
+                        ev.preventDefault();
+                        // 如果补全面板已经可见，Tab/Shift+Tab 在候选之间循环并更新输入
+                        if(this._completionState && this._completionState.visible){
+                            if(ev.shiftKey) this._moveCompletion(-1);
+                            else this._moveCompletion(1);
+                            const cand = this._completionState.candidates[this._completionState.index];
+                            if(typeof cand !== 'undefined'){
+                                const before = this._completionState.beforeText || '';
+                                let newText = before;
+                                if(newText.length && !/\s$/.test(newText)) newText += ' ';
+                                newText += cand;
+                                this.cmdEl.textContent = newText;
+                                this._renderCompletions();
+                                this.focus();
+                            }
+                            return;
+                        }
+                        // 简化版 Tab 补全（完整逻辑在 EventManager 版本中）
+                        // 这里只处理基本的补全逻辑
+                        const raw = this.cmdEl.textContent.replace(/\u00A0/g,' ').replace(/\n/g,'');
+                        const m = raw.match(/(?:^|\s)(\S*)$/);
+                        const token = (m && m[1]) ? m[1] : '';
+                        const before = raw.slice(0, raw.length - token.length);
+                        const isFirstToken = before.trim().length === 0;
+
+                        // 异步获取候选（简化版）
+                        (async () => {
+                            let candidates = [];
+                            try{
+                                if(isFirstToken){
+                                    // 从内置命令列表获取候选
+                                    candidates = this._completionCommands.filter(c => c.indexOf(token) === 0);
+                                    
+                                    // 从ApplicationAssetManager获取CLI程序并添加到候选列表
+                                    try {
+                                        const cliPrograms = this._getCliProgramsForCompletion();
+                                        const tokenLower = token.toLowerCase();
+                                        
+                                        // 过滤匹配token的CLI程序
+                                        const matchingCliPrograms = cliPrograms.filter(p => {
+                                            const programNameLower = p.toLowerCase();
+                                            return programNameLower.indexOf(tokenLower) === 0;
+                                        });
+                                        
+                                        // 合并到候选列表（去重）
+                                        const existingSet = new Set(candidates);
+                                        matchingCliPrograms.forEach(p => {
+                                            if (!existingSet.has(p)) {
+                                                candidates.push(p);
+                                                existingSet.add(p);
+                                            }
+                                        });
+                                    } catch (e) {
+                                        // 如果获取CLI程序失败，忽略错误
+                                        if (typeof KernelLogger !== 'undefined') {
+                                            KernelLogger.warn('Terminal', 'Failed to get CLI programs for completion', e);
+                                        }
+                                    }
+                                    
+                                    // 从 D:/bin/ 目录获取程序并添加到候选列表
+                                    try {
+                                        const binPrograms = await this._getBinProgramsForCompletion();
+                                        const tokenLower = token.toLowerCase();
+                                        
+                                        // 过滤匹配token的程序
+                                        const matchingBinPrograms = binPrograms.filter(p => {
+                                            const programNameLower = p.toLowerCase();
+                                            return programNameLower.indexOf(tokenLower) === 0;
+                                        });
+                                        
+                                        // 合并到候选列表（去重）
+                                        const existingSet = new Set(candidates);
+                                        matchingBinPrograms.forEach(p => {
+                                            if (!existingSet.has(p)) {
+                                                candidates.push(p);
+                                                existingSet.add(p);
+                                            }
+                                        });
+                                    } catch (e) {
+                                        // 如果获取 bin 目录程序失败，忽略错误
+                                        if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.warn('Terminal', 'Failed to get bin programs for completion', e);
+                                    }
+                                    }
+                                    
+                                    // 按字母顺序排序
+                                    candidates.sort();
+                                }else{
+                                    // 文件路径补全（简化版，使用 FileSystem.list）
+                                    const idx = token.lastIndexOf('/');
+                                    const dirPart = idx >= 0 ? token.slice(0, idx + 1) : '';
+                                    const namePrefix = idx >= 0 ? token.slice(idx + 1) : token;
+                                    const dirToList = resolvePath(this.env.cwd, dirPart || '.');
+                                    
+                                    let phpPath = dirToList;
+                                    if (/^[A-Z]:$/.test(phpPath)) {
+                                        phpPath = phpPath + '/';
+                                    }
+                                    
+                                    const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                    ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                    : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                        ? SystemInformation.getOrigin()
+                                        : window.location.origin);
+                                    url.searchParams.set('action', 'list_dir');
+                                    url.searchParams.set('path', phpPath);
+                                    
+                                    try {
+                                        const response = await fetch(url.toString());
+                                        if (response.ok) {
+                                            const result = await response.json();
+                                            if (result.status === 'success' && result.data && result.data.items) {
+                                                const items = result.data.items;
+                                                const nodes = items.filter(item => item.type === 'directory').map(item => item.name + '/');
+                                                const files = items.filter(item => item.type === 'file').map(item => item.name);
+                                                candidates = nodes.concat(files).filter(n => n.indexOf(namePrefix) === 0).map(n => dirPart + n);
+                                            }
+                                        }
+                                    } catch (e) {
+                                        candidates = [];
+                                    }
+                                }
+                            }catch(e){ candidates = []; }
+
+                            if(candidates.length === 0){
+                                this._clearCompletions();
+                                return;
+                            }
+
+                            if(candidates.length === 1){
+                                const completion = candidates[0];
+                                let newText = before;
+                                if(newText.length && !/\s$/.test(newText)) newText += ' ';
+                                newText += completion;
+                                this.cmdEl.textContent = newText;
+                                this.focus();
+                                this._clearCompletions();
+                                return;
+                            }
+
+                            this._showCompletions(candidates, before, '');
+                        })();
+                        return;
+                    }
+
+                    // 在候选面板可见时，拦截上下/Enter/Escape
+                    if(this._completionState && this._completionState.visible){
+                        if(ev.key === 'ArrowDown' || ev.key === 'ArrowUp' || ev.key === 'Enter' || ev.key === 'Escape'){
+                            ev.preventDefault();
+                            if(ev.key === 'ArrowDown'){
+                                this._moveCompletion(1);
+                                return;
+                            }else if(ev.key === 'ArrowUp'){
+                                this._moveCompletion(-1);
+                                return;
+                            }else if(ev.key === 'Enter'){
+                                // 接受补全后，继续执行命令（不返回，让事件继续处理）
+                                this._acceptCompletion();
+                                // 注意：不返回，让 Enter 键的后续处理逻辑执行命令
+                            }else if(ev.key === 'Escape'){
+                                this._clearCompletions();
+                                return;
+                            }
+                            // Enter 键继续执行，不返回
+                        }else{
+                            if(ev.key.length === 1 || ev.key === 'Backspace' || ev.key === 'Delete'){ 
+                                this._clearCompletions(); 
+                            }
+                        }
+                    }
+                });
+            }
+
+            // 处理粘贴事件（使用 EventManager registerElementEvent，因为 paste 不冒泡）
+            if (typeof EventManager !== 'undefined' && this.pid) {
+                EventManager.registerElementEvent(this.pid, this.cmdEl, 'paste', async (ev) => {
+                if (!this.isActive) return;
+                
+                // 防止粘贴样式内容
+                ev.preventDefault();
+                const text = (ev.clipboardData || window.clipboardData).getData('text');
+                document.execCommand('insertText', false, text);
+                });
+            } else {
+                // 降级方案
+                this.cmdEl.addEventListener('paste', async (ev) => {
+                    if (!this.isActive) return;
+                    
+                    // 防止粘贴样式内容
+                    ev.preventDefault();
+                    const text = (ev.clipboardData || window.clipboardData).getData('text');
+                    document.execCommand('insertText', false, text);
+                });
+            }
+            
+            // 处理鼠标滚轮事件
+            // 注意：wheel 事件使用 passive: true 以优化性能
+            this._wheelHandler = (ev) => {
+                if (!this.isActive) return;
+                // 普通模式：完全不做任何处理，让浏览器自然处理滚动
+            };
+            
+            // 使用 passive: true 以优化性能
+            this.outputEl.addEventListener('wheel', this._wheelHandler, { passive: true });
+        }
+
+        _bindWindowControls(){
+            // 使用基于pid的选择器，确保每个实例绑定自己的窗口控制
+            const pidSelector = this.pid ? `[data-pid="${this.pid}"]` : '';
+            const bashWindow = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+            
+            if (!bashWindow) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.warn('Terminal', 'bash-window not found for window controls');
+                }
+                return;
+            }
+            
+            // 检查是否使用了 GUIManager（如果使用了，拖动和拉伸由 GUIManager 自动处理）
+            let hasGUIManager = false;
+            try {
+                const pool = safeGetPool();
+                if (pool && typeof pool.__GET__ === 'function') {
+                    const guiMgr = pool.__GET__("KERNEL_GLOBAL_POOL", "GUIManager");
+                    hasGUIManager = (guiMgr && typeof guiMgr.registerWindow === 'function');
+                }
+            } catch (e) {
+                // 忽略错误
+            }
+            if (!hasGUIManager && typeof window !== 'undefined' && window.GUIManager) {
+                hasGUIManager = (typeof window.GUIManager.registerWindow === 'function');
+            }
+            
+            // 查找该实例的窗口控制元素
+            const closeDot = bashWindow.querySelector(`.dot.close${pidSelector}`);
+            const minDot = bashWindow.querySelector(`.dot.minimize${pidSelector}`);
+            const maxDot = bashWindow.querySelector(`.dot.maximize${pidSelector}`);
+            const bar = bashWindow.querySelector(`.bar${pidSelector}`);
+            const win = bashWindow;
+            
+            // 移除可能存在的旧事件监听器（通过克隆节点）
+            if (closeDot && !closeDot._controlBound) {
+                closeDot._controlBound = true;
+                // 使用 EventManager 注册事件
+                if (typeof EventManager !== 'undefined' && this.pid) {
+                    const closeDotId = `terminal-close-dot-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    closeDot.dataset.eventId = closeDotId;
+                    EventManager.registerEventHandler(this.pid, 'click', (e) => {
+                        e.stopPropagation();
+                        this.minimize();
+                    }, {
+                        priority: 100,
+                        selector: `[data-event-id="${closeDotId}"]`
+                    });
+                } else {
+                    // 降级方案
+                    closeDot.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.minimize();
+                    });
+                }
+            }
+            if (minDot && !minDot._controlBound) {
+                minDot._controlBound = true;
+                // 使用 EventManager 注册事件
+                if (typeof EventManager !== 'undefined' && this.pid) {
+                    const minDotId = `terminal-min-dot-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    minDot.dataset.eventId = minDotId;
+                    EventManager.registerEventHandler(this.pid, 'click', (e) => {
+                        e.stopPropagation();
+                        this.centerOrRestore();
+                    }, {
+                        priority: 100,
+                        selector: `[data-event-id="${minDotId}"]`
+                    });
+                } else {
+                    // 降级方案
+                    minDot.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        this.centerOrRestore();
+                    });
+                }
+            }
+            if (maxDot && !maxDot._controlBound) {
+                maxDot._controlBound = true;
+                // maxDot 的事件已经在 TabManager 构造函数中绑定，这里不再重复绑定
+            }
+
+            // 拖拽实现（仅在较大屏幕启用，且未使用 GUIManager 时）
+            // 如果使用了 GUIManager，拖动功能由 GUIManager 自动处理，这里跳过
+            if (!hasGUIManager) {
+                // 为每个实例创建独立的拖拽状态
+                if (!this._dragState) {
+                    this._dragState = {
+                        dragging: false,
+                        startX: 0,
+                        startY: 0,
+                        startLeft: 0,
+                        startTop: 0,
+                        containerLeft: 0,
+                        containerTop: 0,
+                        containerRight: 0,
+                        containerBottom: 0
+                    };
+                }
+                
+                const dragState = this._dragState;
+                function isSmall(){ return window.matchMedia('(max-width:760px)').matches; }
+                
+                if(bar && win && !bar._dragBound){
+                bar._dragBound = true;
+                // 使用 EventManager 注册拖动事件
+                if (typeof EventManager !== 'undefined' && typeof EventManager.registerDrag === 'function' && this.pid) {
+                    const windowId = `terminal-window-drag-${this.pid}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    EventManager.registerDrag(
+                        windowId,
+                        bar,
+                        win,
+                        win._windowState,
+                        // onDragStart
+                        (ev) => {
+                            // 如果点击的是控制按钮，不触发拖拽
+                            if (ev.target.closest('.dot') || ev.target.closest('.controls')) {
+                                return;
+                            }
+                            
+                            if(isSmall()) return;
+                            
+                            // 检查窗口状态（全屏时不能拖拽）
+                            const state = win._windowState;
+                            if (state && state.isFullscreen) {
+                                return;
+                            }
+                            
+                            // 拖拽开始时，将窗口置于最上层
+                            const allWindows = document.querySelectorAll('.bash-window');
+                            allWindows.forEach(w => {
+                                w.classList.remove('focused');
+                            });
+                            win.classList.add('focused');
+                            
+                            // 获取窗口当前的实际位置
+                            const rect = win.getBoundingClientRect();
+                            const computedStyle = window.getComputedStyle(win);
+                            const currentLeft = computedStyle.left;
+                            const currentTop = computedStyle.top;
+                            const currentTransform = computedStyle.transform;
+                            
+                            // 如果窗口使用百分比定位（如 left: 50%, top: 50%），需要先转换为像素值
+                            // 否则当移除 transform 时，窗口会突然跳到百分比位置
+                            let actualLeft = rect.left;
+                            let actualTop = rect.top;
+                            
+                            // 检查是否使用百分比定位
+                            if (currentLeft.includes('%') || currentTop.includes('%')) {
+                                // 使用 getBoundingClientRect() 获取的实际像素位置
+                                actualLeft = rect.left;
+                                actualTop = rect.top;
+                            } else if (currentLeft && currentTop && currentLeft !== 'auto' && currentTop !== 'auto') {
+                                // 如果已经有像素值，直接使用（但需要考虑 transform）
+                                // 如果使用 transform 居中，getBoundingClientRect() 已经给出了实际位置
+                                actualLeft = rect.left;
+                                actualTop = rect.top;
+                            } else {
+                                // 默认使用 getBoundingClientRect() 的位置
+                                actualLeft = rect.left;
+                                actualTop = rect.top;
+                            }
+                            
+                            // 保存拖动开始时的鼠标位置和窗口位置
+                            dragState.dragging = true;
+                            dragState.startX = ev.clientX;
+                            dragState.startY = ev.clientY;
+                            dragState.startLeft = actualLeft;
+                            dragState.startTop = actualTop;
+                            
+                            // 获取容器边界（用于边界检查）
+                            const guiContainer = document.getElementById('gui-container') || document.body;
+                            const containerRect = guiContainer.getBoundingClientRect();
+                            dragState.containerLeft = containerRect.left;
+                            dragState.containerTop = containerRect.top;
+                            dragState.containerRight = containerRect.right;
+                            dragState.containerBottom = containerRect.bottom;
+                            
+                            bar.classList.add('dragging');
+                            // make window floating
+                            win.classList.add('floating');
+                            // set explicit left/top so we can move (使用计算后的实际位置)
+                            win.style.left = actualLeft + 'px';
+                            win.style.top = actualTop + 'px';
+                            win.style.transform = 'none';
+                            win.style.position = 'fixed';
+                            ev.preventDefault();
+                            ev.stopPropagation();
+                        },
+                        // onDrag
+                        (ev) => {
+                            if(!dragState.dragging) return;
+                            const dx = ev.clientX - dragState.startX;
+                            const dy = ev.clientY - dragState.startY;
+                            
+                            // 计算新位置
+                            let newLeft = dragState.startLeft + dx;
+                            let newTop = dragState.startTop + dy;
+                            
+                            // 获取窗口尺寸
+                            const winRect = win.getBoundingClientRect();
+                            const winWidth = winRect.width;
+                            const winHeight = winRect.height;
+                            
+                            // 边界检查：确保窗口左上角不超出容器范围
+                            // 获取容器边界（如果拖动过程中容器位置改变，重新获取）
+                            const guiContainer = document.getElementById('gui-container') || document.body;
+                            const containerRect = guiContainer.getBoundingClientRect();
+                            const containerLeft = containerRect.left;
+                            const containerTop = containerRect.top;
+                            const containerRight = containerRect.right;
+                            const containerBottom = containerRect.bottom;
+                            
+                            // 限制左上角位置：不能小于容器左上角
+                            newLeft = Math.max(containerLeft, newLeft);
+                            newTop = Math.max(containerTop, newTop);
+                            
+                            // 限制右下角位置：窗口右下角不能超出容器右下角
+                            // 即：newLeft + winWidth <= containerRight
+                            //     newTop + winHeight <= containerBottom
+                            newLeft = Math.min(newLeft, containerRight - winWidth);
+                            newTop = Math.min(newTop, containerBottom - winHeight);
+                            
+                            // 应用新位置
+                            win.style.left = newLeft + 'px';
+                            win.style.top = newTop + 'px';
+                        },
+                        // onDragEnd
+                        (ev) => {
+                            if(!dragState.dragging) return;
+                            dragState.dragging = false;
+                            bar.classList.remove('dragging');
+                        },
+                        ['.dot', '.controls'] // 排除的选择器
+                    );
+                } else {
+                    // 降级方案
+                    bar.addEventListener('mousedown', (ev) => {
+                        // 如果点击的是控制按钮，不触发拖拽
+                        if (ev.target.closest('.dot') || ev.target.closest('.controls')) {
+                            return;
+                        }
+                        
+                        if(isSmall()) return;
+                        
+                        // 检查窗口状态（全屏时不能拖拽）
+                        const state = win._windowState;
+                        if (state && state.isFullscreen) {
+                            return;
+                        }
+                        
+                        // 拖拽开始时，将窗口置于最上层
+                        const allWindows = document.querySelectorAll('.bash-window');
+                        allWindows.forEach(w => {
+                            w.classList.remove('focused');
+                        });
+                        win.classList.add('focused');
+                        
+                        // 获取窗口当前的实际位置
+                        const rect = win.getBoundingClientRect();
+                        const computedStyle = window.getComputedStyle(win);
+                        const currentLeft = computedStyle.left;
+                        const currentTop = computedStyle.top;
+                        const currentTransform = computedStyle.transform;
+                        
+                        // 如果窗口使用百分比定位（如 left: 50%, top: 50%），需要先转换为像素值
+                        // 否则当移除 transform 时，窗口会突然跳到百分比位置
+                        let actualLeft = rect.left;
+                        let actualTop = rect.top;
+                        
+                        // 检查是否使用百分比定位
+                        if (currentLeft.includes('%') || currentTop.includes('%')) {
+                            // 使用 getBoundingClientRect() 获取的实际像素位置
+                            actualLeft = rect.left;
+                            actualTop = rect.top;
+                        } else if (currentLeft && currentTop && currentLeft !== 'auto' && currentTop !== 'auto') {
+                            // 如果已经有像素值，直接使用（但需要考虑 transform）
+                            // 如果使用 transform 居中，getBoundingClientRect() 已经给出了实际位置
+                            actualLeft = rect.left;
+                            actualTop = rect.top;
+                        } else {
+                            // 默认使用 getBoundingClientRect() 的位置
+                            actualLeft = rect.left;
+                            actualTop = rect.top;
+                        }
+                        
+                        // 保存拖动开始时的鼠标位置和窗口位置
+                        dragState.dragging = true;
+                        dragState.startX = ev.clientX;
+                        dragState.startY = ev.clientY;
+                        dragState.startLeft = actualLeft;
+                        dragState.startTop = actualTop;
+                        
+                        // 获取容器边界（用于边界检查）
+                        const guiContainer = document.getElementById('gui-container') || document.body;
+                        const containerRect = guiContainer.getBoundingClientRect();
+                        dragState.containerLeft = containerRect.left;
+                        dragState.containerTop = containerRect.top;
+                        dragState.containerRight = containerRect.right;
+                        dragState.containerBottom = containerRect.bottom;
+                        
+                        bar.classList.add('dragging');
+                        // make window floating
+                        win.classList.add('floating');
+                        // set explicit left/top so we can move (使用计算后的实际位置)
+                        win.style.left = actualLeft + 'px';
+                        win.style.top = actualTop + 'px';
+                        win.style.transform = 'none';
+                        win.style.position = 'fixed';
+                        ev.preventDefault();
+                        ev.stopPropagation();
+                    });
+                    
+                    // 使用命名空间事件，避免多个实例冲突
+                    const mousemoveHandler = (ev) => {
+                        if(!dragState.dragging) return;
+                        const dx = ev.clientX - dragState.startX;
+                        const dy = ev.clientY - dragState.startY;
+                        
+                        // 计算新位置
+                        let newLeft = dragState.startLeft + dx;
+                        let newTop = dragState.startTop + dy;
+                        
+                        // 获取窗口尺寸
+                        const winRect = win.getBoundingClientRect();
+                        const winWidth = winRect.width;
+                        const winHeight = winRect.height;
+                        
+                        // 边界检查：确保窗口左上角不超出容器范围
+                        // 获取容器边界（如果拖动过程中容器位置改变，重新获取）
+                        const guiContainer = document.getElementById('gui-container') || document.body;
+                        const containerRect = guiContainer.getBoundingClientRect();
+                        const containerLeft = containerRect.left;
+                        const containerTop = containerRect.top;
+                        const containerRight = containerRect.right;
+                        const containerBottom = containerRect.bottom;
+                        
+                        // 限制左上角位置：不能小于容器左上角
+                        newLeft = Math.max(containerLeft, newLeft);
+                        newTop = Math.max(containerTop, newTop);
+                        
+                        // 限制右下角位置：窗口右下角不能超出容器右下角
+                        // 即：newLeft + winWidth <= containerRight
+                        //     newTop + winHeight <= containerBottom
+                        newLeft = Math.min(newLeft, containerRight - winWidth);
+                        newTop = Math.min(newTop, containerBottom - winHeight);
+                        
+                        // 应用新位置
+                        win.style.left = newLeft + 'px';
+                        win.style.top = newTop + 'px';
+                    };
+                    
+                    const mouseupHandler = (ev) => {
+                        if(!dragState.dragging) return;
+                        dragState.dragging = false;
+                        bar.classList.remove('dragging');
+                    };
+                    
+                    // 使用 EventManager 注册临时拖动事件
+                    if (typeof EventManager !== 'undefined' && this.pid) {
+                        const mousemoveHandlerId = EventManager.registerEventHandler(this.pid, 'mousemove', mousemoveHandler, {
+                            priority: 50,
+                            once: false
+                        });
+                        
+                        const mouseupHandlerId = EventManager.registerEventHandler(this.pid, 'mouseup', mouseupHandler, {
+                            priority: 50,
+                            once: true
+                        });
+                        
+                        // 存储事件处理器ID，以便后续清理
+                        if (!this._dragEventHandlers) {
+                            this._dragEventHandlers = [];
+                        }
+                        this._dragEventHandlers.push(mousemoveHandlerId, mouseupHandlerId);
+                    } else {
+                        // 降级：直接使用 addEventListener（不推荐）
+                        document.addEventListener('mousemove', mousemoveHandler);
+                        document.addEventListener('mouseup', mouseupHandler);
+                    }
+                }
+            }
+            } // 结束 if (!hasGUIManager) 块
+        }
+
+        // Window control APIs
+        minimize(){
+            const win = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+            if(!win) return;
+            if(this.minimized){
+                // restore
+                win.style.display = '';
+                this.minimized = false;
+            }else{
+                win.style.display = 'none';
+                this.minimized = true;
+            }
+        }
+
+        maximize(){
+            const win = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+            if(!win) return;
+            const isMax = !!this._maximized;
+            if(isMax){
+                // restore
+                if(this._prevRect){
+                    win.style.position = this._prevRect.position || '';
+                    win.style.left = this._prevRect.left;
+                    win.style.top = this._prevRect.top;
+                    win.style.width = this._prevRect.width;
+                    win.style.height = this._prevRect.height;
+                    win.style.transform = this._prevRect.transform || '';
+                }
+                this._maximized = false;
+            }else{
+                // store prev
+                const rect = win.getBoundingClientRect();
+                this._prevRect = { left: win.style.left || rect.left + 'px', top: win.style.top || rect.top + 'px', width: win.style.width || rect.width + 'px', height: win.style.height || rect.height + 'px', transform: win.style.transform, position: win.style.position };
+                win.style.position = 'fixed';
+                win.style.left = '0px';
+                win.style.top = '0px';
+                win.style.width = window.innerWidth + 'px';
+                win.style.height = window.innerHeight + 'px';
+                win.style.transform = 'none';
+                this._maximized = true;
+            }
+        }
+
+        centerOrRestore(){
+            const win = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+            if(!win) return;
+            if(win.classList.contains('floating')){
+                // restore to centered
+                win.classList.remove('floating');
+                win.style.transform = 'translate(-50%,-50%)';
+                win.style.left = '50%';
+                win.style.top = '50%';
+                this._maximized = false;
+            }else{
+                // make sure centered
+                win.classList.remove('floating');
+                win.style.position = 'fixed';
+                win.style.left = '50%';
+                win.style.top = '50%';
+                win.style.transform = 'translate(-50%,-50%)';
+            }
+        }
+
+        _bindResizer(){
+            // 使用基于pid的选择器，确保每个实例绑定自己的resizer
+            const bashWindow = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+            if (!bashWindow) {
+                return;
+            }
+            
+            // 检查是否使用了 GUIManager（如果使用了，拉伸由 GUIManager 自动处理）
+            let hasGUIManager = false;
+            try {
+                const pool = safeGetPool();
+                if (pool && typeof pool.__GET__ === 'function') {
+                    const guiMgr = pool.__GET__("KERNEL_GLOBAL_POOL", "GUIManager");
+                    hasGUIManager = (guiMgr && typeof guiMgr.registerWindow === 'function');
+                }
+            } catch (e) {
+                // 忽略错误
+            }
+            if (!hasGUIManager && typeof window !== 'undefined' && window.GUIManager) {
+                hasGUIManager = (typeof window.GUIManager.registerWindow === 'function');
+            }
+            
+            // 如果使用了 GUIManager，拉伸功能由 GUIManager 自动处理，这里跳过
+            if (hasGUIManager) {
+                return;
+            }
+            
+            // 查找该实例的resizer（右下角和右上角）
+            const resizerBottomRight = bashWindow.querySelector(`.window-resizer.bottom-right[data-pid="${this.pid}"]`);
+            const resizerTopRight = bashWindow.querySelector(`.window-resizer.top-right[data-pid="${this.pid}"]`);
+            const win = bashWindow;
+            
+            if(!resizerBottomRight && !resizerTopRight) return;
+            
+            // 为每个实例创建独立的resize状态
+            if (!this._resizeState) {
+                this._resizeState = {
+                    resizing: false,
+                    startX: 0,
+                    startY: 0,
+                    startW: 0,
+                    startH: 0,
+                    startTop: 0,
+                    anchor: null
+                };
+            }
+            
+            const resizeState = this._resizeState;
+            const minW = (this.config && this.config.minWidth) ? this.config.minWidth : 480;
+            const minH = (this.config && this.config.minHeight) ? this.config.minHeight : 240;
+            function clamp(v, a, b){ return Math.max(a, Math.min(b, v)); }
+            
+            // 绑定右下角resizer
+            if (resizerBottomRight && !resizerBottomRight._resizeBound) {
+                resizerBottomRight._resizeBound = true;
+                resizerBottomRight.addEventListener('mousedown', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    
+                    // 检查窗口状态（全屏时不能调整大小）
+                    const state = win._windowState;
+                    if (state && state.isFullscreen) {
+                        return;
+                    }
+                    
+                    if(!this.config || !this.config.resizable) return;
+                    
+                    // 拉伸开始时，将窗口置于最上层
+                    const allWindows = document.querySelectorAll('.bash-window');
+                    allWindows.forEach(w => {
+                        w.classList.remove('focused');
+                    });
+                    win.classList.add('focused');
+                    
+                    resizeState.resizing = true;
+                    resizeState.startX = ev.clientX;
+                    resizeState.startY = ev.clientY;
+                    const rect = win.getBoundingClientRect();
+                    resizeState.startW = rect.width;
+                    resizeState.startH = rect.height;
+                    resizeState.anchor = 'bottom-right';
+                    // make floating so left/top work
+                    win.classList.add('floating');
+                    win.style.position = 'fixed';
+                });
+            }
+            
+            // 绑定右上角resizer
+            if (resizerTopRight && !resizerTopRight._resizeBound) {
+                resizerTopRight._resizeBound = true;
+                resizerTopRight.addEventListener('mousedown', (ev) => {
+                    ev.preventDefault();
+                    ev.stopPropagation();
+                    
+                    // 检查窗口状态（全屏时不能调整大小）
+                    const state = win._windowState;
+                    if (state && state.isFullscreen) {
+                        return;
+                    }
+                    
+                    if(!this.config || !this.config.resizable) return;
+                    
+                    // 拉伸开始时，将窗口置于最上层
+                    const allWindows = document.querySelectorAll('.bash-window');
+                    allWindows.forEach(w => {
+                        w.classList.remove('focused');
+                    });
+                    win.classList.add('focused');
+                    
+                    resizeState.resizing = true;
+                    resizeState.startX = ev.clientX;
+                    resizeState.startY = ev.clientY;
+                    const rect = win.getBoundingClientRect();
+                    resizeState.startW = rect.width;
+                    resizeState.startH = rect.height;
+                    resizeState.startTop = rect.top;
+                    resizeState.anchor = 'top-right';
+                    // make floating so left/top work
+                    win.classList.add('floating');
+                    win.style.position = 'fixed';
+                });
+            }
+            
+            // 使用命名空间事件，避免多个实例冲突
+            const mousemoveHandler = (ev) => {
+                if(!resizeState.resizing) return;
+                const dx = ev.clientX - resizeState.startX;
+                const dy = ev.clientY - resizeState.startY;
+                const vw = window.innerWidth, vh = window.innerHeight;
+                const maxW = (this.config && this.config.maxWidth) ? this.config.maxWidth : Math.max(300, vw - 40);
+                const maxH = (this.config && this.config.maxHeight) ? this.config.maxHeight : Math.max(200, vh - 40);
+                const newW = clamp(resizeState.startW + dx, minW, maxW);
+                
+                if (resizeState.anchor === 'top-right') {
+                    const newH = clamp(resizeState.startH - dy, minH, maxH);
+                    const newTop = resizeState.startTop + (resizeState.startH - newH);
+                    win.style.width = newW + 'px';
+                    win.style.height = newH + 'px';
+                    win.style.top = newTop + 'px';
+                } else {
+                    const newH = clamp(resizeState.startH + dy, minH, maxH);
+                    win.style.width = newW + 'px';
+                    win.style.height = newH + 'px';
+                }
+            };
+            
+            const mouseupHandler = () => {
+                if(!resizeState.resizing) return;
+                resizeState.resizing = false;
+                resizeState.anchor = null;
+            };
+            
+            // 使用 EventManager 注册临时拉伸事件
+            if (typeof EventManager !== 'undefined' && this.pid) {
+                const mousemoveHandlerId = EventManager.registerEventHandler(this.pid, 'mousemove', mousemoveHandler, {
+                    priority: 50,
+                    once: false
+                });
+                
+                const mouseupHandlerId = EventManager.registerEventHandler(this.pid, 'mouseup', mouseupHandler, {
+                    priority: 50,
+                    once: true
+                });
+                
+                // 存储事件处理器ID，以便后续清理
+                if (!this._resizeEventHandlers) {
+                    this._resizeEventHandlers = [];
+                }
+                this._resizeEventHandlers.push(mousemoveHandlerId, mouseupHandlerId);
+            } else {
+                // 降级：直接使用 addEventListener（不推荐）
+                document.addEventListener('mousemove', mousemoveHandler);
+                document.addEventListener('mouseup', mouseupHandler);
+            }
+        }
+
+        // apply config at runtime
+        setConfig(obj){
+            if(!obj || typeof obj !== 'object') return;
+            this.config = Object.assign({}, this.config, obj);
+            // apply font and size
+            const win = this.terminalElement ? this.terminalElement.closest('.bash-window') : null;
+            if(win){
+                win.style.fontFamily = this.config.fontFamily;
+                win.style.fontSize = (this.config.fontSize || 16) + 'px';
+            }
+            // scrollbar style
+            if(this.config.scrollbarStyle === 'overlay') document.body.classList.add('scrollbar-overlay');
+            else document.body.classList.remove('scrollbar-overlay');
+        }
+
+        _setBusy(flag){
+            this.busy = !!flag;
+            if(this.busy){
+                this.cmdEl.setAttribute('contenteditable','false');
+                this.cmdEl.classList.add('disabled');
+                // 隐藏整个输入行（包括提示符和命令输入）
+                if (this.inputLineEl) {
+                    this.inputLineEl.style.display = 'none';
+                } else {
+                    // 降级方案：只隐藏命令输入和提示符
+                    this.cmdEl.style.display = 'none';
+                    this.promptEl.style.display = 'none';
+                }
+            }else{
+                // 只有在活动标签页时才显示命令输入
+                if (this.isActive) {
+                    // 显示整个输入行
+                    if (this.inputLineEl) {
+                        this.inputLineEl.style.display = '';
+                    } else {
+                        // 降级方案：显示命令输入和提示符
+                        this.cmdEl.style.display = '';
+                        this.promptEl.style.display = '';
+                    }
+                    this.cmdEl.setAttribute('contenteditable','true');
+                    this.cmdEl.classList.remove('disabled');
+                    this._updatePrompt();
+                    this.focus();
+                } else {
+                    // 非活动标签页保持隐藏，但更新状态
+                    if (this.inputLineEl) {
+                        this.inputLineEl.style.display = 'none';
+                    } else {
+                        this.cmdEl.style.display = 'none';
+                        this.promptEl.style.display = 'none';
+                    }
+                    this.cmdEl.setAttribute('contenteditable','false');
+                    this.cmdEl.classList.remove('disabled');
+                    this._updatePrompt();
+                }
+            }
+        }
+
+        // cancel current command (sets cancel token and attempts to notify listeners)
+        cancelCurrent(){
+            // 只在活动标签页且 busy 状态下处理 Ctrl+C
+            if(!this.busy || !this.isActive) return;
+            
+            // 优先使用保存的 CLI 程序 PID
+            if (this._currentCliPid && typeof ProcessManager !== 'undefined') {
+                const ProcessMgr = ProcessManager;
+                const processInfo = ProcessMgr.PROCESS_TABLE.get(this._currentCliPid);
+                // 检查进程是否存在且未退出（包括 'loading', 'starting', 'running' 状态）
+                if (processInfo && processInfo.status !== 'exited') {
+                    // 尝试终止 CLI 程序（killProgram 可以处理所有非 'exited' 状态）
+                    ProcessMgr.killProgram(this._currentCliPid, false).catch(e => {
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.warn('Terminal', `终止 CLI 程序失败 (PID: ${this._currentCliPid}): ${e.message}`);
+                        }
+                    });
+                    // 清除保存的 PID
+                    this._currentCliPid = null;
+                    // visually emulate Ctrl+C
+                    this.write('\n^C\n');
+                    this._setBusy(false);
+                    return;
+                }
+            }
+            
+            // 如果没有保存的 PID，查找与当前终端关联的正在运行的 CLI 程序
+            if (typeof ProcessManager !== 'undefined') {
+                const ProcessMgr = ProcessManager;
+                // 查找与当前终端关联的正在运行的 CLI 程序（包括 'loading', 'starting', 'running' 状态）
+                for (const [pid, info] of ProcessMgr.PROCESS_TABLE) {
+                    if (info.terminalPid === this.pid && info.isCLI && info.status !== 'exited') {
+                        // 尝试终止 CLI 程序（killProgram 可以处理所有非 'exited' 状态）
+                        ProcessMgr.killProgram(pid, false).catch(e => {
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.warn('Terminal', `终止 CLI 程序失败 (PID: ${pid}): ${e.message}`);
+                            }
+                        });
+                        // visually emulate Ctrl+C
+                        this.write('\n^C\n');
+                        this._setBusy(false);
+                        return;
+                    }
+                }
+            }
+            
+            // 处理其他类型的命令取消
+            if(this._currentCancel){
+                this._currentCancel.cancelled = true;
+                if(typeof this._currentCancel.fn === 'function'){
+                    try{ this._currentCancel.fn(); }catch(e){}
+                }
+            }
+            // visually emulate Ctrl+C
+            this.write('\n^C\n');
+            this._setBusy(false);
+        }
+
+        // 处理命令，支持事件监听器返回 Promise，或 handler 返回 Promise
+        _handleCommand(payload){
+            // 只在活动标签页处理命令
+            if (!this.isActive) {
+                return Promise.resolve();
+            }
+            
+            // 尝试事件驱动处理（支持 cancelToken）
+            const listeners = this._listeners.get('command');
+            // prepare cancel token
+            const cancelToken = { cancelled: false };
+            this._currentCancel = cancelToken;
+            if(listeners && listeners.length){
+                try{
+                    const results = listeners.map(fn => {
+                        try{ return fn(Object.assign({}, payload, { cancelToken })); }catch(e){ return Promise.reject(e); }
+                    });
+                    // 如果有任何异步结果，则等待全部完成
+                    const hasPromise = results.some(r => r && typeof r.then === 'function');
+                    if(hasPromise){
+                        return Promise.all(results.map(r => (r && typeof r.then === 'function') ? r : Promise.resolve(r))).finally(()=>{ this._currentCancel = null });
+                    }
+                    this._currentCancel = null;
+                    return Promise.resolve(results);
+                }catch(e){
+                    this._currentCancel = null;
+                    return Promise.reject(e);
+                }
+            }
+            // 向后兼容：调用 commandHandler
+            try{
+                // pass cancelToken to handler if it accepts
+                const res = this.commandHandler(payload.cmdString, payload.args, payload.env, payload.write, payload.done, cancelToken);
+                if(res && typeof res.then === 'function') return res.finally(()=>{ this._currentCancel = null });
+                this._currentCancel = null;
+                return Promise.resolve(res);
+            }catch(e){
+                this._currentCancel = null;
+                return Promise.reject(e);
+            }
+        }
+
+        // 切换 newestOnTop 视图
+        toggleView(){
+            this.newestOnTop = !this.newestOnTop;
+            // 使用实例的输出元素，而不是全局的
+            const out = this.outputEl;
+            if(!out) return;
+            // 翻转现有输出顺序
+            const nodes = Array.from(out.childNodes);
+            nodes.reverse().forEach(n => out.appendChild(n));
+            this.write(`View: newestOnTop=${this.newestOnTop}`);
+        }
+
+        // 简单演示脚本
+        demo(){
+            const seq = [
+                {cmd:'echo Hello from demo'},
+                {out:'Hello from demo'},
+                {cmd:'pwd'},
+                {out:this.env.cwd},
+                {cmd:'whoami'},
+                {out:this.env.user}
+            ];
+            let i=0;
+            const runNext = () => {
+                if(i>=seq.length) return;
+                const item = seq[i++];
+                if(item.cmd){
+                    this._echoCommand(item.cmd);
+                    setTimeout(runNext, 250);
+                }else if(item.out){
+                    this.write(item.out);
+                    setTimeout(runNext, 250);
+                }
+            };
+            runNext();
+        }
+
+        _argsFrom(input){
+            if(!input) return [];
+            // simple split, user may replace handler with custom parser
+            return input.split(/\s+/).filter(Boolean);
+        }
+
+        _echoCommand(input){
+            const line = document.createElement('div');
+            line.className = 'line cmd-line out-line';
+            const p = document.createElement('span');
+            p.className = 'prompt';
+            p.textContent = this.promptEl.textContent + ' ';
+            const cmdSpan = document.createElement('span');
+            cmdSpan.className = 'cmd';
+            cmdSpan.textContent = input;
+            line.appendChild(p);
+            line.appendChild(cmdSpan);
+            // 插入到底部（与 Kali/大多数终端一致）
+            this.outputEl.appendChild(line);
+            // 强制触发入场动画并滚动到底部
+            requestAnimationFrame(() => line.classList.add('visible'));
+            this._scrollToBottom();
+        }
+
+        _scrollToBottom(){
+            this.outputEl.scrollTop = this.outputEl.scrollHeight;
+        }
+
+        // 展示补全面板
+        _showCompletions(candidates, beforeText, dirPart){
+            // 初始化状态
+            this._completionState = {
+                visible: true,
+                candidates: candidates.slice(),
+                index: 0,
+                beforeText: beforeText || '',
+                dirPart: dirPart || ''
+            }; // 触发保存
+
+            // 准备 DOM 容器
+            if(!this._completionBox){
+                this._completionBox = document.createElement('div');
+                this._completionBox.className = 'completion-box';
+                // 标记DOM元素（如果知道PID）
+                if (this.pid && this._completionBox.dataset) {
+                    this._completionBox.dataset.pid = this.pid.toString();
+                }
+                // 基本样式
+                Object.assign(this._completionBox.style, {
+                    position: 'absolute',
+                    background: '#0b0b0b',
+                    color: '#e6e6e6',
+                    border: '1px solid #2e2e2e',
+                    padding: '6px',
+                    fontFamily: this.config.fontFamily,
+                    fontSize: (this.config.fontSize || 14) + 'px',
+                    zIndex: 9999,
+                    maxHeight: '240px',
+                    overflowY: 'auto',
+                    whiteSpace: 'pre',
+                    boxShadow: '0 2px 6px rgba(0,0,0,0.6)'
+                });
+                document.body.appendChild(this._completionBox);
+            }
+
+            // 渲染候选项
+            this._renderCompletions();
+            // 定位到输入框右下方
+            this._positionCompletionBox();
+        }
+
+        _renderCompletions(){
+            if(!this._completionBox) return;
+            this._completionBox.innerHTML = '';
+            const ul = document.createElement('div');
+            ul.style.display = 'block';
+            // 标记DOM元素（如果知道PID）
+            if (this.pid && ul.dataset) {
+                ul.dataset.pid = this.pid.toString();
+            }
+            const max = this._completionState.candidates.length;
+            for(let i=0;i<max;i++){
+                const item = document.createElement('div');
+                // 标记DOM元素（如果知道PID）
+                if (this.pid && item.dataset) {
+                    item.dataset.pid = this.pid.toString();
+                }
+                item.className = 'completion-item';
+                item.textContent = this._completionState.candidates[i];
+                item.style.padding = '2px 8px';
+                item.style.cursor = 'default';
+                if(i === this._completionState.index){
+                    item.style.background = '#2a2a2a';
+                }
+                // 点击选择（使用 EventManager）
+                if (typeof EventManager !== 'undefined' && this.pid) {
+                    const itemId = `terminal-completion-item-${i}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+                    item.dataset.eventId = itemId;
+                    EventManager.registerEventHandler(this.pid, 'mousedown', (ev) => {
+                        if (item === ev.target || item.contains(ev.target)) {
+                            ev.preventDefault();
+                            const state = this._completionState;
+                            state.index = i;
+                            this._completionState = state; // 触发保存
+                            this._acceptCompletion();
+                        }
+                    }, {
+                        priority: 100,
+                        selector: `[data-event-id="${itemId}"]`
+                    });
+                } else {
+                    // 降级方案
+                    item.addEventListener('mousedown', (ev) => {
+                        ev.preventDefault();
+                        const state = this._completionState;
+                        state.index = i;
+                        this._completionState = state; // 触发保存
+                        this._acceptCompletion();
+                    });
+                }
+                ul.appendChild(item);
+            }
+            this._completionBox.appendChild(ul);
+            this._ensureCompletionVisible();
+        }
+
+        _positionCompletionBox(){
+            if(!this._completionBox) return;
+            const rect = this.cmdEl.getBoundingClientRect();
+            // 放在输入框下方，稍微左移以对齐
+            const left = rect.left;
+            let top = rect.bottom + 6;
+            // 保证不超出视口底部
+            const boxRect = this._completionBox.getBoundingClientRect();
+            if(top + boxRect.height > window.innerHeight){
+                top = rect.top - boxRect.height - 6;
+            }
+            this._completionBox.style.left = (left) + 'px';
+            this._completionBox.style.top = (top) + 'px';
+            // 宽度至少与输入框一致
+            this._completionBox.style.minWidth = Math.max(180, rect.width) + 'px';
+        }
+
+        _ensureCompletionVisible(){
+            if(!this._completionBox) return;
+            const items = Array.from(this._completionBox.querySelectorAll('.completion-item'));
+            const idx = this._completionState.index;
+            if(idx < 0 || idx >= items.length) return;
+            const el = items[idx];
+            const box = this._completionBox;
+            const er = el.getBoundingClientRect();
+            const br = box.getBoundingClientRect();
+            if(er.top < br.top) box.scrollTop -= (br.top - er.top) + 4;
+            else if(er.bottom > br.bottom) box.scrollTop += (er.bottom - br.bottom) + 4;
+        }
+
+        _clearCompletions(){
+            const state = this._completionState;
+            state.visible = false;
+            state.candidates = [];
+            state.index = -1;
+            state.beforeText = '';
+            state.dirPart = '';
+            this._completionState = state; // 触发保存
+            if(this._completionBox){
+                this._completionBox.parentNode && this._completionBox.parentNode.removeChild(this._completionBox);
+                this._completionBox = null;
+            }
+        }
+
+        _moveCompletion(delta){
+            const state = this._completionState;
+            if(!state.visible) return;
+            const n = state.candidates.length;
+            if(n === 0) return;
+            let idx = state.index + delta;
+            // wrap-around 模式：超出尾部从头开始，向前同理
+            idx = ((idx % n) + n) % n;
+            state.index = idx;
+            this._completionState = state; // 触发保存
+            this._renderCompletions();
+        }
+
+        _acceptCompletion(){
+            if(!this._completionState.visible) return;
+            const idx = this._completionState.index;
+            const cand = this._completionState.candidates[idx];
+            if(typeof cand === 'undefined') return;
+            const cmdElTextBefore = this._completionState.beforeText || '';
+            let newText = cmdElTextBefore;
+            if(newText.length && !/\s$/.test(newText)) newText += ' ';
+            newText += cand;
+            this.cmdEl.textContent = newText;
+            this.focus();
+            this._clearCompletions();
+        }
+
+        // 默认的 switch 框架（可被覆盖）
+        _defaultHandler(cmdString, args, env, write){
+            if(!cmdString){
+                write('');
+                return;
+            }
+            const cmd = args[0];
+            switch(cmd){
+                case 'clear':
+                    this.clear();
+                    break;
+                case 'pwd':
+                    write(env.cwd);
+                    break;
+                case 'whoami':
+                    write(env.user);
+                    break;
+                default:
+                    write(`${cmd}: command not found`);
+            }
+        }
+
+        // 事件 API: on/off/emit
+        on(eventName, fn){
+            if(typeof fn !== 'function') return;
+            const list = this._listeners.get(eventName) || [];
+            list.push(fn);
+            this._listeners.set(eventName, list);
+            return () => this.off(eventName, fn);
+        }
+
+        off(eventName, fn){
+            const list = this._listeners.get(eventName);
+            if(!list) return;
+            const idx = list.indexOf(fn);
+            if(idx >= 0) list.splice(idx,1);
+            if(list.length === 0) this._listeners.delete(eventName);
+        }
+
+        // emit 支持传入单个对象参数（事件负载），返回是否存在 listener
+        emit(eventName, payload){
+            const list = this._listeners.get(eventName);
+            if(!list || list.length === 0) return false;
+            // 调用所有监听器（不阻塞）
+            list.forEach(fn => {
+                try{ fn(payload); }catch(e){ 
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.error('Terminal', 'Terminal listener errored', e);
+                    }
+                }
+            });
+            return true;
+        }
+
+        // API: 写入输出区域
+        // 支持多种调用方式：
+        // - write(text) - 纯文本（自动转义，向后兼容）
+        // - write({text: '...'}) - 纯文本（显式指定）
+        // - write({html: '...'}) - HTML 片段（不转义，直接渲染）
+        // - write({text: '...', className: '...'}) - 带 CSS 类的文本
+        // - write({html: '...', className: '...'}) - 带 CSS 类的 HTML
+        write(textOrOptions){
+            const line = document.createElement('div');
+            line.className = 'out-line';
+            // 标记DOM元素（如果知道PID）
+            if (this.pid && line.dataset) {
+                line.dataset.pid = this.pid.toString();
+            }
+            
+            // 向后兼容：如果传入字符串，按原方式处理
+            if (typeof textOrOptions === 'string') {
+                line.textContent = textOrOptions;
+            } else if (typeof textOrOptions === 'object' && textOrOptions !== null) {
+                // 新 API：支持对象参数
+                if (textOrOptions.html !== undefined) {
+                    // HTML 模式：直接设置 innerHTML（注意安全性）
+                    line.innerHTML = textOrOptions.html;
+                } else if (textOrOptions.text !== undefined) {
+                    // 文本模式：使用 textContent（自动转义）
+                    line.textContent = textOrOptions.text;
+                } else {
+                    // 降级：尝试转换为字符串
+                    line.textContent = String(textOrOptions);
+                }
+                
+                // 添加自定义 CSS 类
+                if (textOrOptions.className) {
+                    line.className += ' ' + textOrOptions.className;
+                }
+                
+                // 添加自定义样式
+                if (textOrOptions.style && typeof textOrOptions.style === 'object') {
+                    Object.assign(line.style, textOrOptions.style);
+                }
+            } else {
+                // 其他类型：转换为字符串
+                line.textContent = String(textOrOptions);
+            }
+            
+            this.outputEl.appendChild(line);
+            requestAnimationFrame(() => line.classList.add('visible'));
+            this._scrollToBottom();
+        }
+
+        clear(){
+            this.outputEl.innerHTML = '';
+        }
+
+        // 注入CSS样式（用于自定义UI）
+        injectCSS(cssText, id = null) {
+            if (!cssText || typeof cssText !== 'string') {
+                return false;
+            }
+            
+            // 如果没有提供ID，生成一个唯一ID
+            if (!id) {
+                id = `terminal-custom-css-${this.pid || 'default'}-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            }
+            
+            // 检查是否已经存在相同ID的样式
+            let styleEl = document.getElementById(id);
+            if (styleEl) {
+                // 如果已存在，更新内容
+                styleEl.textContent = cssText;
+                return true;
+            }
+            
+            // 创建新的style元素
+            styleEl = document.createElement('style');
+            styleEl.id = id;
+            styleEl.type = 'text/css';
+            styleEl.textContent = cssText;
+            
+            // 添加到文档head中
+            if (document.head) {
+                document.head.appendChild(styleEl);
+                return true;
+            }
+            
+            return false;
+        }
+
+        // 移除CSS样式
+        removeCSS(id) {
+            if (!id) {
+                return false;
+            }
+            
+            const styleEl = document.getElementById(id);
+            if (styleEl && styleEl.parentNode) {
+                styleEl.parentNode.removeChild(styleEl);
+                return true;
+            }
+            
+            return false;
+        }
+
+        // 创建自定义HTML容器（用于复杂的自定义UI，如vim编辑器）
+        createContainer(html, options = {}) {
+            if (!html || typeof html !== 'string') {
+                return null;
+            }
+            
+            // 创建一个容器元素
+            const container = document.createElement('div');
+            container.className = options.className || 'terminal-custom-container';
+            
+            // 添加自定义样式
+            if (options.style && typeof options.style === 'object') {
+                Object.assign(container.style, options.style);
+            }
+            
+            // 设置HTML内容
+            container.innerHTML = html;
+            
+            // 标记DOM元素（如果知道PID）
+            if (this.pid && container.dataset) {
+                container.dataset.pid = this.pid.toString();
+            }
+            
+            // 添加到输出区域
+            this.outputEl.appendChild(container);
+            
+            // 触发可见性动画（如果容器包含 out-line 类）
+            requestAnimationFrame(() => {
+                container.querySelectorAll('.out-line').forEach(line => {
+                    line.classList.add('visible');
+                });
+            });
+            
+            this._scrollToBottom();
+            
+            return container;
+        }
+
+        // Exploit 内存管理工具 - 统一的临时数据存储
+        _ensureExploitMemory() {
+            const EXPLOIT_PID = 10000;
+            const HEAP_ID = 1;
+            const SHED_ID = 1;
+            const HEAP_SIZE = 200000; // 200KB 用于存储所有临时数据
+            
+            try {
+                if (typeof MemoryManager === 'undefined' || typeof Heap === 'undefined') {
+                    return null;
+                }
+                
+                // 分配内存（如果还没有分配）
+                const appSpace = MemoryManager.APPLICATION_SOP.get(EXPLOIT_PID);
+                if (!appSpace || !appSpace.heaps.has(HEAP_ID)) {
+                    MemoryManager.allocateMemory(HEAP_ID, SHED_ID, HEAP_SIZE, EXPLOIT_PID);
+                    // 注册程序名称
+                    if (typeof MemoryManager.registerProgramName === 'function') {
+                        MemoryManager.registerProgramName(EXPLOIT_PID, 'Exploit');
+                    }
+                }
+                
+                const appMem = MemoryManager.APPLICATION_SOP.get(EXPLOIT_PID);
+                if (!appMem || !appMem.heaps.has(HEAP_ID) || !appMem.sheds.has(SHED_ID)) {
+                    return null;
+                }
+                
+                return {
+                    pid: EXPLOIT_PID,
+                    heap: appMem.heaps.get(HEAP_ID),
+                    shed: appMem.sheds.get(SHED_ID)
+                };
+            } catch (e) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', 'Failed to ensure Exploit memory', e);
+                }
+                return null;
+            }
+        }
+
+        // 保存终端输出内容到内存系统（使用Exploit程序PID 10000）
+        _saveTerminalContent() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return null;
+            try {
+                const heap = exploit.heap;
+                const shed = exploit.shed;
+                
+                // 收集所有输出行的内容
+                const lines = Array.from(this.outputEl.children).map(child => {
+                    return {
+                        html: child.innerHTML,
+                        className: child.className,
+                        style: child.style.cssText
+                    };
+                });
+                
+                // 将内容序列化为 JSON 字符串
+                const serialized = JSON.stringify(lines);
+                
+                // 使用类似 Vim 的方法将字符串写入 Heap
+                const length = serialized.length;
+                const addr = heap.alloc(length + 1);
+                if (!addr) {
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.error('Terminal', 'Failed to allocate heap memory for terminal content');
+                    }
+                    return null;
+                }
+                
+                const startIdx = Heap.addressing(addr, 10);
+                if (startIdx < 0 || startIdx >= heap.heapSize) {
+                    return null;
+                }
+                
+                // 写入字符串字符
+                for (let i = 0; i < length; i++) {
+                    if (startIdx + i < heap.heapSize) {
+                        heap.writeData(Heap.addressing(startIdx + i, 16), serialized[i]);
+                    }
+                }
+                
+                // 写入结束符
+                if (startIdx + length < heap.heapSize) {
+                    heap.writeData(Heap.addressing(startIdx + length, 16), '\0');
+                }
+                
+                // 在 Shed 中保存地址信息
+                shed.writeResourceLink('TERMINAL_CONTENT_ADDR', addr);
+                shed.writeResourceLink('TERMINAL_CONTENT_SIZE', length);
+                
+                return { pid: exploit.pid, addr: addr, size: length };
+            } catch (e) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', 'Failed to save terminal content', e);
+                }
+            }
+            return null;
+        }
+
+        // 从内存系统恢复终端输出内容
+        _restoreTerminalContent() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return false;
+            
+            try {
+                const heap = exploit.heap;
+                const shed = exploit.shed;
+                
+                // 从 Shed 中读取地址信息
+                const addr = shed.readResourceLink('TERMINAL_CONTENT_ADDR');
+                
+                if (!addr) return false;
+                
+                // 从 Heap 中读取字符串（类似 Vim 的方法）
+                const startIdx = Heap.addressing(addr, 10);
+                if (startIdx < 0 || startIdx >= heap.heapSize) return false;
+                
+                // 读取字符串直到遇到结束符
+                let serialized = '';
+                let i = startIdx;
+                while (i < heap.heapSize) {
+                    const char = heap.readData(Heap.addressing(i, 16));
+                    if (char === '\0' || char === null || (typeof char === 'object' && char.__reserved)) {
+                        break;
+                    }
+                    if (typeof char === 'string' && char.length === 1) {
+                        serialized += char;
+                    } else {
+                        break;
+                    }
+                    i++;
+                }
+                
+                if (!serialized) return false;
+                
+                // 反序列化
+                const lines = JSON.parse(serialized);
+                
+                // 恢复输出内容
+                this.outputEl.innerHTML = ''; // 先清空
+                
+                lines.forEach(lineData => {
+                    const line = document.createElement('div');
+                    line.className = lineData.className || 'out-line';
+                    line.innerHTML = lineData.html || '';
+                    if (lineData.style) {
+                        line.style.cssText = lineData.style;
+                    }
+                    this.outputEl.appendChild(line);
+                });
+                
+                // 恢复可见性动画
+                requestAnimationFrame(() => {
+                    this.outputEl.querySelectorAll('.out-line').forEach(line => {
+                        line.classList.add('visible');
+                    });
+                });
+                
+                // 滚动到底部
+                this._scrollToBottom();
+                
+                return true;
+            } catch (e) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', 'Failed to restore terminal content', e);
+                }
+            }
+            return false;
+        }
+
+        // 保存剪贴板数据到 Exploit 内存
+        _saveClipboardToMemory(clipboardData) {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return false;
+            
+            try {
+                const heap = exploit.heap;
+                const shed = exploit.shed;
+                
+                // 序列化剪贴板数据
+                const serialized = JSON.stringify(clipboardData);
+                const length = serialized.length;
+                
+                // 释放旧的剪贴板内存（如果存在）
+                const oldAddr = shed.readResourceLink('CLIPBOARD_ADDR');
+                if (oldAddr) {
+                    const oldSize = shed.readResourceLink('CLIPBOARD_SIZE') || 0;
+                    const oldStartIdx = Heap.addressing(oldAddr, 10);
+                    if (oldStartIdx >= 0 && oldStartIdx < heap.heapSize) {
+                        heap.free(oldAddr, oldSize + 1);
+                    }
+                }
+                
+                // 分配新内存
+                const addr = heap.alloc(length + 1);
+                if (!addr) {
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.error('Terminal', 'Failed to allocate heap memory for clipboard');
+                    }
+                    return false;
+                }
+                
+                const startIdx = Heap.addressing(addr, 10);
+                if (startIdx < 0 || startIdx >= heap.heapSize) {
+                    return false;
+                }
+                
+                // 写入字符串字符
+                for (let i = 0; i < length; i++) {
+                    if (startIdx + i < heap.heapSize) {
+                        heap.writeData(Heap.addressing(startIdx + i, 16), serialized[i]);
+                    }
+                }
+                
+                // 写入结束符
+                if (startIdx + length < heap.heapSize) {
+                    heap.writeData(Heap.addressing(startIdx + length, 16), '\0');
+                }
+                
+                // 在 Shed 中保存地址信息
+                shed.writeResourceLink('CLIPBOARD_ADDR', addr);
+                shed.writeResourceLink('CLIPBOARD_SIZE', length);
+                
+                return true;
+            } catch (e) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', 'Failed to save clipboard to memory', e);
+                }
+                return false;
+            }
+        }
+
+        // 从 Exploit 内存读取剪贴板数据
+        _loadClipboardFromMemory() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return null;
+            
+            try {
+                const heap = exploit.heap;
+                const shed = exploit.shed;
+                
+                // 从 Shed 中读取地址信息
+                const addr = shed.readResourceLink('CLIPBOARD_ADDR');
+                if (!addr) return null;
+                
+                // 从 Heap 中读取字符串
+                const startIdx = Heap.addressing(addr, 10);
+                if (startIdx < 0 || startIdx >= heap.heapSize) return null;
+                
+                // 读取字符串直到遇到结束符
+                let serialized = '';
+                let i = startIdx;
+                while (i < heap.heapSize) {
+                    const char = heap.readData(Heap.addressing(i, 16));
+                    if (char === '\0' || char === null || (typeof char === 'object' && char.__reserved)) {
+                        break;
+                    }
+                    if (typeof char === 'string' && char.length === 1) {
+                        serialized += char;
+                    } else {
+                        break;
+                    }
+                    i++;
+                }
+                
+                if (!serialized) return null;
+                
+                // 反序列化
+                return JSON.parse(serialized);
+            } catch (e) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', 'Failed to load clipboard from memory', e);
+                }
+                return null;
+            }
+        }
+
+        // ========== 终端数据内存管理方法 ==========
+        
+        // 从内存初始化终端数据
+        _loadTerminalDataFromMemory() {
+            // 初始化环境变量（从内存或使用默认值）
+            const savedEnv = this._loadEnvFromMemory();
+            if (savedEnv) {
+                this.env = savedEnv;
+            }
+            // 确保 cwd 从全局池获取（优先使用全局池的值）
+            const workspaceCwd = safePoolGet("KERNEL_GLOBAL_POOL","WORK_SPACE");
+            // 优先使用 POOL 中的值，但如果值是 'C:'，则忽略并使用默认值 D:
+            if (workspaceCwd && typeof workspaceCwd === 'string' && workspaceCwd !== 'C:') {
+                // POOL 中有值且不是 'C:'，使用它
+                this.env.cwd = workspaceCwd;
+                this._saveEnvToMemory(); // 保存更新后的值
+            } else {
+                // POOL 中没有值或值无效，使用默认值（系统盘 D: 或第一个可用分区）
+                // 如果当前值是 '~' 或无效值，替换为系统盘或第一个可用分区
+                if (!this.env.cwd || typeof this.env.cwd !== 'string' || 
+                    this.env.cwd === '[object Object]' || this.env.cwd === '~') {
+                    // 获取默认工作目录（系统盘 D: 或第一个可用分区）
+                    let defaultCwd = 'D:';  // 默认使用系统盘 D:
+                    if (typeof Disk !== 'undefined' && Disk.diskSeparateSize && Disk.diskSeparateSize.size > 0) {
+                        // 优先使用系统盘 D:
+                        if (Disk.diskSeparateSize.has('D:')) {
+                            defaultCwd = 'D:';
+                        } else {
+                            // 如果 D: 不存在，使用第一个可用分区
+                            defaultCwd = Array.from(Disk.diskSeparateSize.keys())[0];
+                        }
+                    }
+                    this.env.cwd = defaultCwd;
+                    this._saveEnvToMemory(); // 保存默认值
+                }
+            }
+            
+            // 初始化命令历史（从内存加载）
+            this._loadHistoryFromMemory();
+            
+            // 初始化补全状态（从内存加载）
+            this._loadCompletionStateFromMemory();
+        }
+        
+        // 保存/加载环境变量
+        _saveEnvToMemory() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return false;
+            return this._saveDataToMemory(`TERMINAL_${this.tabId}_ENV`, JSON.stringify(this.env));
+        }
+        
+        _loadEnvFromMemory() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return null;
+            const data = this._loadDataFromMemory(`TERMINAL_${this.tabId}_ENV`);
+            return data ? JSON.parse(data) : null;
+        }
+        
+        // 保存/加载命令历史
+        _saveHistoryToMemory() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return false;
+            const historyData = {
+                history: this._historyCache || [],
+                historyIndex: this._historyIndexCache !== undefined ? this._historyIndexCache : -1
+            };
+            return this._saveDataToMemory(`TERMINAL_${this.tabId}_HISTORY`, JSON.stringify(historyData));
+        }
+        
+        _loadHistoryFromMemory() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) {
+                this._historyCache = [];
+                this._historyIndexCache = -1;
+                return;
+            }
+            const data = this._loadDataFromMemory(`TERMINAL_${this.tabId}_HISTORY`);
+            if (data) {
+                try {
+                    const historyData = JSON.parse(data);
+                    this._historyCache = historyData.history || [];
+                    this._historyIndexCache = historyData.historyIndex !== undefined ? historyData.historyIndex : -1;
+                } catch (e) {
+                    this._historyCache = [];
+                    this._historyIndexCache = -1;
+                }
+            } else {
+                this._historyCache = [];
+                this._historyIndexCache = -1;
+            }
+        }
+        
+        // 保存/加载补全状态
+        _saveCompletionStateToMemory() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return false;
+            const completionData = this._completionStateCache || { visible: false, candidates: [], index: -1, beforeText: '', dirPart: '' };
+            return this._saveDataToMemory(`TERMINAL_${this.tabId}_COMPLETION`, JSON.stringify(completionData));
+        }
+        
+        _loadCompletionStateFromMemory() {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) {
+                this._completionStateCache = { visible: false, candidates: [], index: -1, beforeText: '', dirPart: '' };
+                return;
+            }
+            const data = this._loadDataFromMemory(`TERMINAL_${this.tabId}_COMPLETION`);
+            if (data) {
+                try {
+                    this._completionStateCache = JSON.parse(data);
+                } catch (e) {
+                    this._completionStateCache = { visible: false, candidates: [], index: -1, beforeText: '', dirPart: '' };
+                }
+            } else {
+                this._completionStateCache = { visible: false, candidates: [], index: -1, beforeText: '', dirPart: '' };
+            }
+        }
+        
+        // 通用数据保存/加载方法
+        _saveDataToMemory(key, data) {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return false;
+            
+            try {
+                const heap = exploit.heap;
+                const shed = exploit.shed;
+                
+                const length = data.length;
+                
+                // 释放旧内存
+                const oldAddr = shed.readResourceLink(`${key}_ADDR`);
+                if (oldAddr) {
+                    const oldSize = shed.readResourceLink(`${key}_SIZE`) || 0;
+                    const oldStartIdx = Heap.addressing(oldAddr, 10);
+                    if (oldStartIdx >= 0 && oldStartIdx < heap.heapSize) {
+                        heap.free(oldAddr, oldSize + 1);
+                    }
+                }
+                
+                // 分配新内存
+                const addr = heap.alloc(length + 1);
+                if (!addr) return false;
+                
+                const startIdx = Heap.addressing(addr, 10);
+                if (startIdx < 0 || startIdx >= heap.heapSize) return false;
+                
+                // 写入数据
+                for (let i = 0; i < length; i++) {
+                    if (startIdx + i < heap.heapSize) {
+                        heap.writeData(Heap.addressing(startIdx + i, 16), data[i]);
+                    }
+                }
+                if (startIdx + length < heap.heapSize) {
+                    heap.writeData(Heap.addressing(startIdx + length, 16), '\0');
+                }
+                
+                shed.writeResourceLink(`${key}_ADDR`, addr);
+                shed.writeResourceLink(`${key}_SIZE`, length);
+                
+                return true;
+            } catch (e) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', `Failed to save data to memory (key: ${key})`, e);
+                }
+                return false;
+            }
+        }
+        
+        _loadDataFromMemory(key) {
+            const exploit = this._ensureExploitMemory();
+            if (!exploit) return null;
+            
+            try {
+                const heap = exploit.heap;
+                const shed = exploit.shed;
+                
+                const addr = shed.readResourceLink(`${key}_ADDR`);
+                if (!addr) {
+                    // 调试日志：键不存在
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.debug('Terminal', `_loadDataFromMemory: 键不存在 key=${key}`);
+                    }
+                    return null;
+                }
+                
+                // 读取大小信息
+                const size = shed.readResourceLink(`${key}_SIZE`);
+                const maxLength = size ? parseInt(size, 10) : null;
+                
+                // 使用批量读取方法读取字符串
+                const serialized = heap.readString(addr, maxLength);
+                
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.debug('Terminal', `_loadDataFromMemory: 加载完成 key=${key}`, {
+                        key: key,
+                        addr: addr,
+                        size: size,
+                        maxLength: maxLength,
+                        resultLength: serialized ? serialized.length : 0,
+                        preview: serialized ? (serialized.length > 50 ? serialized.substring(0, 50) + '...' : serialized) : null
+                    });
+                }
+                
+                return serialized || null;
+            } catch (e) {
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', `Failed to load data from memory (key: ${key})`, e);
+                }
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.error('Terminal', `_loadDataFromMemory 异常 key=${key}`, { error: e.message, stack: e.stack });
+                }
+                return null;
+            }
+        }
+
+        // 获取CLI程序列表（用于Tab补全，带缓存）
+        _getCliProgramsForCompletion() {
+            const now = Date.now();
+            
+            // 检查缓存是否有效
+            if (this._cliProgramsCache !== null && (now - this._cliProgramsCacheTime) < this._cliProgramsCacheTTL) {
+                return this._cliProgramsCache;
+            }
+            
+            // 缓存失效或不存在，重新获取
+            const cliPrograms = [];
+            
+            try {
+                let AssetManager = null;
+                if (typeof ApplicationAssetManager !== 'undefined') {
+                    AssetManager = ApplicationAssetManager;
+                } else if (typeof safePoolGet === 'function') {
+                    AssetManager = safePoolGet('KERNEL_GLOBAL_POOL', 'ApplicationAssetManager');
+                } else if (typeof safeGetPool === 'function') {
+                    const pool = safeGetPool();
+                    if (pool && typeof pool.__GET__ === 'function') {
+                        AssetManager = pool.__GET__('KERNEL_GLOBAL_POOL', 'ApplicationAssetManager');
+                    }
+                }
+                
+                if (AssetManager && typeof AssetManager.listPrograms === 'function') {
+                    const allPrograms = AssetManager.listPrograms();
+                    
+                    // 筛选出CLI类型的程序
+                    for (const programName of allPrograms) {
+                        try {
+                            let isCli = false;
+                            
+                            // 方法1：从ApplicationAssetManager获取程序信息
+                            const programInfo = AssetManager.getProgramInfo(programName);
+                            if (programInfo) {
+                                if (programInfo.metadata && programInfo.metadata.type === 'CLI') {
+                                    isCli = true;
+                                } else if (programInfo.type === 'CLI') {
+                                    // 兼容：如果type在顶层
+                                    isCli = true;
+                                }
+                            }
+                            
+                            // 方法2：如果ApplicationAssetManager没有类型信息，尝试从程序对象获取
+                            if (!isCli && (!programInfo || !programInfo.type)) {
+                                const programNameUpper = programName.toUpperCase();
+                                let programClass = null;
+                                if (typeof window !== 'undefined' && window[programNameUpper]) {
+                                    programClass = window[programNameUpper];
+                                } else if (typeof globalThis !== 'undefined' && globalThis[programNameUpper]) {
+                                    programClass = globalThis[programNameUpper];
+                                }
+                                
+                                if (programClass && typeof programClass.__info__ === 'function') {
+                                    try {
+                                        const info = programClass.__info__();
+                                        if (info && (info.type === 'CLI' || (info.metadata && info.metadata.type === 'CLI'))) {
+                                            isCli = true;
+                                        }
+                                    } catch (e) {
+                                        // 忽略错误
+                                    }
+                                }
+                            }
+                            
+                            if (isCli) {
+                                cliPrograms.push(programName);
+                            }
+                        } catch (e) {
+                            // 忽略单个程序的错误，继续处理其他程序
+                        }
+                    }
+                }
+            } catch (e) {
+                // 如果获取CLI程序失败，忽略错误，返回空数组
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.warn('Terminal', 'Failed to get CLI programs for completion', e);
+                }
+            }
+            
+            // 更新缓存
+            this._cliProgramsCache = cliPrograms;
+            this._cliProgramsCacheTime = now;
+            
+            return cliPrograms;
+        }
+        
+        // 获取 D:/bin/ 目录下的程序列表（用于Tab补全，带缓存）
+        async _getBinProgramsForCompletion() {
+            const now = Date.now();
+            
+            // 检查缓存是否有效
+            if (this._binProgramsCache !== null && (now - this._binProgramsCacheTime) < this._binProgramsCacheTTL) {
+                return this._binProgramsCache;
+            }
+            
+            // 缓存失效或不存在，重新获取
+            const binPrograms = [];
+            
+            try {
+                // 使用 FileSystem.list API 列出 D:/bin/ 目录下的所有 .js 文件
+                if (typeof ProcessManager !== 'undefined' && typeof ProcessManager.callKernelAPI === 'function') {
+                    try {
+                        const items = await ProcessManager.callKernelAPI(this.pid, 'FileSystem.list', ['D:/bin']);
+                        if (Array.isArray(items)) {
+                            for (const item of items) {
+                                let fileName = null;
+                                if (typeof item === 'string') {
+                                    fileName = item;
+                                } else if (typeof item === 'object' && item !== null) {
+                                    fileName = item.name || item.fileName;
+                                }
+                                
+                                if (fileName && fileName.endsWith('.js')) {
+                                    // 移除 .js 扩展名，获取程序名
+                                    const programName = fileName.slice(0, -3);
+                                    if (programName && !binPrograms.includes(programName)) {
+                                        binPrograms.push(programName);
+                                    }
+                                }
+                            }
+                        }
+                    } catch (e) {
+                        // 如果 FileSystem.list 失败，尝试使用 PHP 服务
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.debug('Terminal', 'FileSystem.list failed, trying PHP service', e);
+                        }
+                    }
+                }
+                
+                // 降级方案：使用 PHP 服务
+                if (binPrograms.length === 0) {
+                    const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                        ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                        : new URL('/system/service/FSDirve.php', (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                            ? SystemInformation.getOrigin()
+                            : window.location.origin);
+                    
+                    url.searchParams.set('action', 'list_dir');
+                    url.searchParams.set('path', 'D:/bin');
+                    
+                    const response = await fetch(url.toString());
+                    if (response.ok) {
+                        const result = await response.json();
+                        if (result.status === 'success' && result.data) {
+                            const items = Array.isArray(result.data) ? result.data : (result.data.items || []);
+                            for (const item of items) {
+                                let fileName = null;
+                                if (typeof item === 'string') {
+                                    fileName = item;
+                                } else if (typeof item === 'object' && item !== null) {
+                                    fileName = item.name || item.fileName;
+                                    // 跳过目录
+                                    if (item.type === 'directory' || item.type === 'dir') {
+                                        continue;
+                                    }
+                                }
+                                
+                                if (fileName && fileName.endsWith('.js')) {
+                                    // 移除 .js 扩展名，获取程序名
+                                    const programName = fileName.slice(0, -3);
+                                    if (programName && !binPrograms.includes(programName)) {
+                                        binPrograms.push(programName);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            } catch (e) {
+                // 如果获取 bin 目录程序失败，忽略错误，返回空数组
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.warn('Terminal', 'Failed to get bin programs for completion', e);
+                }
+            }
+            
+            // 更新缓存
+            this._binProgramsCache = binPrograms;
+            this._binProgramsCacheTime = now;
+            
+            return binPrograms;
+        }
+        
+        focus(){
+            if (!this.isActive) return;
+            
+            // 确保元素可见且可聚焦
+            if (!this.cmdEl || this.cmdEl.offsetParent === null) {
+                // 如果元素不可见，延迟重试
+                setTimeout(() => {
+                    if (this.isActive && this.cmdEl && this.cmdEl.offsetParent !== null) {
+                        this.focus();
+                    }
+                }, 50);
+                return;
+            }
+            
+            // 如果元素被禁用，不聚焦
+            if (this.cmdEl.getAttribute('contenteditable') === 'false' || this.busy) {
+                return;
+            }
+            
+            // 聚焦到输入框
+            try {
+                this.cmdEl.focus();
+                
+                // 将光标移动到文本末尾
+                const range = document.createRange();
+                range.selectNodeContents(this.cmdEl);
+                range.collapse(false);
+                const sel = window.getSelection();
+                if (sel.rangeCount > 0) {
+                    sel.removeAllRanges();
+                }
+                sel.addRange(range);
+                
+                // 添加焦点视觉指示（通过CSS类）
+                this.cmdEl.classList.add('focused');
+                
+                // 滚动到输入框（如果被遮挡）
+                this.cmdEl.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+            } catch(e) {
+                // 如果选择失败，至少确保焦点
+                if (typeof KernelLogger !== 'undefined') {
+                    KernelLogger.warn('Terminal', 'Terminal focus error', e);
+                }
+                try {
+                    this.cmdEl.focus();
+                    this.cmdEl.classList.add('focused');
+                } catch(e2) {
+                    // 完全失败，忽略
+                }
+            }
+        }
+        
+        // 失去焦点时的处理
+        blur(){
+            if (this.cmdEl) {
+                this.cmdEl.classList.remove('focused');
+                this.cmdEl.blur();
+            }
+        }
+
+        setCwd(path){ 
+            this.env.cwd = path; 
+            this._saveEnvToMemory();
+            this._updatePrompt(); 
+        }
+        setUser(user){ 
+            this.env.user = user; 
+            this._saveEnvToMemory();
+            this._updatePrompt(); 
+        }
+        setHost(host){ 
+            this.env.host = host; 
+            this._saveEnvToMemory();
+            this._updatePrompt(); 
+        }
+        
+        // 命令历史的 getter/setter（使用内存管理）
+        get history() {
+            if (!this._historyCache) {
+                this._loadHistoryFromMemory();
+            }
+            return this._historyCache || [];
+        }
+        
+        set history(value) {
+            this._historyCache = value || [];
+            this._saveHistoryToMemory();
+        }
+        
+        get historyIndex() {
+            if (this._historyIndexCache === undefined) {
+                this._loadHistoryFromMemory();
+            }
+            return this._historyIndexCache !== undefined ? this._historyIndexCache : -1;
+        }
+        
+        set historyIndex(value) {
+            this._historyIndexCache = value;
+            this._saveHistoryToMemory();
+        }
+        
+        // 补全状态的 getter/setter（使用内存管理）
+        get _completionState() {
+            if (!this._completionStateCache) {
+                this._loadCompletionStateFromMemory();
+            }
+            return this._completionStateCache || { visible: false, candidates: [], index: -1, beforeText: '', dirPart: '' };
+        }
+        
+        set _completionState(value) {
+            this._completionStateCache = value || { visible: false, candidates: [], index: -1, beforeText: '', dirPart: '' };
+            this._saveCompletionStateToMemory();
+        }
+
+        // 替换内部处理函数（向后兼容）
+        setCommandHandler(fn){
+            if(typeof fn === 'function'){
+                // 清除所有 'command' 事件监听并使用单一 handler 保持兼容
+                this._listeners.delete('command');
+                this.commandHandler = fn;
+            }
+        }
+    }
+
+    // 为终端实例注册命令处理器的函数（现在定义，在 TerminalInstance 类之后）
+    registerCommandHandlers = function(terminalInstance) {
+        // 防止重复注册：如果已注册，先移除旧的监听器
+        if (terminalInstance._commandHandlerRegistered) {
+            // 移除旧的命令监听器（如果有的话）
+            const oldHandler = terminalInstance._commandHandler;
+            if (oldHandler) {
+                terminalInstance.off('command', oldHandler);
+            }
+        }
+        terminalInstance._commandHandlerRegistered = true;
+        
+        // 创建命令处理器函数并保存引用，以便后续可以移除
+        // 命令权限检查函数
+        const checkCommandPermission = (cmd, payload) => {
+            // 需要管理员权限的命令列表
+            const adminOnlyCommands = [
+                'power',      // 电源管理（重启/关机）
+                'kill',       // 终止进程
+                'rm',         // 删除文件/目录
+                'mv',         // 移动文件/目录（可能覆盖系统文件）
+                'write',      // 写入文件（可能修改系统文件）
+                'markdir',    // 创建目录（可能在系统盘创建）
+                'markfile',   // 创建文件（可能在系统盘创建）
+                'users',      // 查看用户列表（敏感信息）
+                'login',      // 切换用户（可能提权）
+                'su',         // 切换用户（可能提权）
+                'groupadd',   // 创建用户组
+                'groupmod',   // 修改用户组
+                'tcpdump',    // 网络数据包捕获（敏感操作，需要管理员权限）
+                'debug'       // 调试工具（触发异常测试，需要管理员权限）
+            ];
+            
+            // 检查命令是否需要管理员权限
+            if (adminOnlyCommands.includes(cmd)) {
+                if (typeof UserControl === 'undefined') {
+                    payload.write(`${cmd}: 权限检查失败: UserControl 未加载`);
+                    return false;
+                }
+                
+                if (!UserControl.isAdmin()) {
+                    payload.write(`${cmd}: 权限不足: 此命令需要管理员权限`);
+                    return false;
+                }
+            }
+            
+            return true;
+        };
+        
+        // 检查系统盘D:访问权限
+        const checkSystemDiskAccess = (path, payload) => {
+            // 检查路径是否在系统盘（支持所有分区，但通常D:是系统盘）
+            const normalizedPath = path.replace(/\\/g, '/');
+            const partitionMatch = normalizedPath.match(/^([A-Z]):/);
+            // 注意：这里可以扩展为检查多个系统分区，目前保持D:为系统盘
+            if (partitionMatch && partitionMatch[1] === 'D') {
+                if (typeof UserControl === 'undefined') {
+                    payload.write('权限检查失败: UserControl 未加载');
+                    return false;
+                }
+                
+                if (!UserControl.isAdmin()) {
+                    payload.write('权限不足: 非管理员用户无法访问系统盘 D:');
+                    return false;
+                }
+            }
+            
+            return true;
+        };
+        
+        const commandHandler = (payload) => {
+        const cmd = payload.args[0];
+        
+        // 首先检查命令权限
+        if (!checkCommandPermission(cmd, payload)) {
+            return;
+        }
+        
+        switch(cmd){
+            case 'exit':
+                // exit 命令：关闭当前终端程序进程
+                if (typeof ProcessManager !== 'undefined' && typeof ProcessManager.killProgram === 'function') {
+                    // 动态获取终端程序的 PID
+                    let terminalProgramPid = null;
+                    
+                    // 方法1：直接从 terminalInstance.pid 获取（最可靠的方法）
+                    if (terminalInstance && terminalInstance.pid) {
+                        terminalProgramPid = terminalInstance.pid;
+                    }
+                    // 方法2：从 terminalInstance.tabManager.pid 获取
+                    else if (terminalInstance && terminalInstance.tabManager && terminalInstance.tabManager.pid) {
+                        terminalProgramPid = terminalInstance.tabManager.pid;
+                    }
+                    // 方法3：从 TERMINAL._instances 中查找当前实例对应的 PID
+                    else if (typeof TERMINAL !== 'undefined' && TERMINAL._instances && TERMINAL._instances.size > 0) {
+                        // 遍历所有实例，找到包含当前 terminalInstance 的实例
+                        for (const [pid, instance] of TERMINAL._instances) {
+                            if (instance && instance.tabManager) {
+                                // 检查当前 terminalInstance 是否属于这个 tabManager
+                                const tabs = instance.tabManager.tabs || [];
+                                const found = tabs.some(tab => tab.terminalInstance === terminalInstance);
+                                if (found) {
+                                    terminalProgramPid = pid;
+                                    break;
+                                }
+                            }
+                        }
+                        // 如果还是找不到，使用第一个实例的 PID（降级方案）
+                        if (!terminalProgramPid) {
+                            const firstInstance = TERMINAL._instances.values().next().value;
+                            if (firstInstance && firstInstance.pid) {
+                                terminalProgramPid = firstInstance.pid;
+                            }
+                        }
+                    }
+                    // 方法4：从 ProcessManager 中查找终端进程（最后降级方案）
+                    if (!terminalProgramPid && typeof ProcessManager !== 'undefined' && typeof ProcessManager.listProcesses === 'function') {
+                        try {
+                            const processes = ProcessManager.listProcesses();
+                            const terminalProcesses = processes.filter(p => {
+                                const programName = p.programName || '';
+                                return programName.toLowerCase() === 'terminal' && p.status === 'running';
+                            });
+                            // 如果有多个终端进程，使用第一个（无法确定是哪个）
+                            if (terminalProcesses.length > 0) {
+                                terminalProgramPid = terminalProcesses[0].pid;
+                            }
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                    }
+                    
+                    if (terminalProgramPid) {
+                        ProcessManager.killProgram(terminalProgramPid);
+                    } else {
+                        payload.write('exit: 无法获取终端进程ID');
+                    }
+                } else {
+                    payload.write('exit: ProcessManager 不可用');
+                }
+                break;
+            case 'clear':
+                terminalInstance.clear();
+                break;
+            case 'pwd':
+                payload.write(payload.env.cwd);
+                break;
+            case 'whoami':
+                payload.write(payload.env.user);
+                break;
+            case 'login':
+                // login 命令：切换用户
+                (async () => {
+                    try {
+                        if (typeof UserControl === 'undefined') {
+                            payload.write('login: UserControl 未加载');
+                            return;
+                        }
+                        
+                        await UserControl.ensureInitialized();
+                        
+                        if (payload.args.length < 2) {
+                            payload.write('login: 用法: login <用户名>');
+                            return;
+                        }
+                        
+                        const username = payload.args[1];
+                        const success = await UserControl.login(username);
+                        
+                        if (success) {
+                            // 更新终端用户显示（setUser 会更新 env.user 并调用 _updatePrompt）
+                            terminalInstance.setUser(username);
+                            // payload.env 是对 terminalInstance.env 的引用，所以已经更新了
+                            terminalInstance._saveEnvToMemory();
+                            
+                            const userLevel = UserControl.getCurrentUserLevel();
+                            const levelText = userLevel === UserControl.USER_LEVEL.DEFAULT_ADMIN ? '默认管理员' :
+                                             userLevel === UserControl.USER_LEVEL.ADMIN ? '管理员' : '用户';
+                            payload.write(`已登录用户: ${username} (${levelText})`);
+                        } else {
+                            payload.write(`login: 登录失败: 用户 ${username} 不存在`);
+                        }
+                    } catch (error) {
+                        payload.write(`login: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'su':
+                // su 命令：切换用户（与 login 相同）
+                (async () => {
+                    try {
+                        if (typeof UserControl === 'undefined') {
+                            payload.write('su: UserControl 未加载');
+                            return;
+                        }
+                        
+                        await UserControl.ensureInitialized();
+                        
+                        if (payload.args.length < 2) {
+                            payload.write('su: 用法: su <用户名>');
+                            return;
+                        }
+                        
+                        const username = payload.args[1];
+                        const success = await UserControl.login(username);
+                        
+                        if (success) {
+                            // 更新终端用户显示（setUser 会更新 env.user 并调用 _updatePrompt）
+                            terminalInstance.setUser(username);
+                            // payload.env 是对 terminalInstance.env 的引用，所以已经更新了
+                            terminalInstance._saveEnvToMemory();
+                            
+                            const userLevel = UserControl.getCurrentUserLevel();
+                            const levelText = userLevel === UserControl.USER_LEVEL.DEFAULT_ADMIN ? '默认管理员' :
+                                             userLevel === UserControl.USER_LEVEL.ADMIN ? '管理员' : '用户';
+                            payload.write(`已切换用户: ${username} (${levelText})`);
+                        } else {
+                            payload.write(`su: 切换失败: 用户 ${username} 不存在`);
+                        }
+                    } catch (error) {
+                        payload.write(`su: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'users':
+                // users 命令：列出所有用户
+                (async () => {
+                    try {
+                        if (typeof UserControl === 'undefined') {
+                            payload.write('users: UserControl 未加载');
+                            return;
+                        }
+                        
+                        await UserControl.ensureInitialized();
+                        const users = UserControl.listUsers();
+                        
+                        if (users.length === 0) {
+                            payload.write('users: 没有用户');
+                            return;
+                        }
+                        
+                        const currentUser = UserControl.getCurrentUser();
+                        payload.write('用户列表:');
+                        for (const user of users) {
+                            const levelText = user.level === UserControl.USER_LEVEL.DEFAULT_ADMIN ? '默认管理员' :
+                                             user.level === UserControl.USER_LEVEL.ADMIN ? '管理员' : '用户';
+                            const current = user.username === currentUser ? ' (当前)' : '';
+                            payload.write(`  ${user.username} - ${levelText}${current}`);
+                        }
+                    } catch (error) {
+                        payload.write(`users: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'groups':
+                // groups 命令：列出所有用户组
+                (async () => {
+                    try {
+                        if (typeof UserGroup === 'undefined') {
+                            payload.write('groups: UserGroup 未加载');
+                            return;
+                        }
+                        
+                        await UserGroup.ensureInitialized();
+                        const groups = await UserGroup.getAllGroups();
+                        
+                        if (groups.length === 0) {
+                            payload.write('groups: 没有用户组');
+                            return;
+                        }
+                        
+                        payload.write('用户组列表:');
+                        for (const group of groups) {
+                            const typeText = group.type === UserGroup.GROUP_TYPE.ADMIN_GROUP ? '管理员组' : '用户组';
+                            const memberCount = group.members.length;
+                            const desc = group.description ? ` - ${group.description}` : '';
+                            payload.write(`  ${group.name} (${typeText}, ${memberCount} 个成员)${desc}`);
+                        }
+                    } catch (error) {
+                        payload.write(`groups: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'groupadd':
+                // groupadd 命令：创建用户组（需要管理员权限）
+                (async () => {
+                    try {
+                        // 检查权限
+                        if (typeof UserControl === 'undefined' || !UserControl.isAdmin()) {
+                            payload.write('groupadd: 需要管理员权限');
+                            return;
+                        }
+                        
+                        if (typeof UserGroup === 'undefined') {
+                            payload.write('groupadd: UserGroup 未加载');
+                            return;
+                        }
+                        
+                        if (payload.args.length < 2) {
+                            payload.write('groupadd: 用法: groupadd <组名> [类型] [描述]');
+                            payload.write('  类型: USER_GROUP (默认) 或 ADMIN_GROUP');
+                            payload.write('  描述: 可选的组描述');
+                            return;
+                        }
+                        
+                        const groupName = payload.args[1];
+                        let groupType = UserGroup.GROUP_TYPE.USER_GROUP;
+                        let description = null;
+                        
+                        // 解析类型参数
+                        if (payload.args.length >= 3) {
+                            const typeArg = payload.args[2].toUpperCase();
+                            if (typeArg === 'ADMIN_GROUP' || typeArg === 'ADMIN') {
+                                // 只有默认管理员可以创建管理员组
+                                if (!UserControl.isDefaultAdmin()) {
+                                    payload.write('groupadd: 只有默认管理员可以创建管理员组');
+                                    return;
+                                }
+                                groupType = UserGroup.GROUP_TYPE.ADMIN_GROUP;
+                            } else if (typeArg !== 'USER_GROUP' && typeArg !== 'USER') {
+                                // 如果不是类型参数，可能是描述
+                                description = payload.args.slice(2).join(' ');
+                            }
+                        }
+                        
+                        // 解析描述参数
+                        if (payload.args.length >= 4 && !description) {
+                            description = payload.args.slice(3).join(' ');
+                        } else if (payload.args.length === 3 && !description && 
+                                   payload.args[2].toUpperCase() !== 'ADMIN_GROUP' && 
+                                   payload.args[2].toUpperCase() !== 'ADMIN' &&
+                                   payload.args[2].toUpperCase() !== 'USER_GROUP' && 
+                                   payload.args[2].toUpperCase() !== 'USER') {
+                            description = payload.args[2];
+                        }
+                        
+                        await UserGroup.ensureInitialized();
+                        const success = await UserGroup.createGroup(groupName, groupType, description);
+                        
+                        if (success) {
+                            payload.write(`groupadd: 组 "${groupName}" 已创建`);
+                        } else {
+                            payload.write(`groupadd: 创建组失败，请检查组名是否已存在或权限是否足够`);
+                        }
+                    } catch (error) {
+                        payload.write(`groupadd: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'groupdel':
+                // groupdel 命令：删除用户组（需要默认管理员权限）
+                (async () => {
+                    try {
+                        // 检查权限
+                        if (typeof UserControl === 'undefined' || !UserControl.isDefaultAdmin()) {
+                            payload.write('groupdel: 需要默认管理员权限');
+                            return;
+                        }
+                        
+                        if (typeof UserGroup === 'undefined') {
+                            payload.write('groupdel: UserGroup 未加载');
+                            return;
+                        }
+                        
+                        if (payload.args.length < 2) {
+                            payload.write('groupdel: 用法: groupdel <组名>');
+                            return;
+                        }
+                        
+                        const groupName = payload.args[1];
+                        
+                        // 检查是否为默认组（不能删除）
+                        if (groupName === 'admins' || groupName === 'users') {
+                            payload.write(`groupdel: 不能删除默认组 "${groupName}"`);
+                            return;
+                        }
+                        
+                        await UserGroup.ensureInitialized();
+                        const success = await UserGroup.deleteGroup(groupName);
+                        
+                        if (success) {
+                            payload.write(`groupdel: 组 "${groupName}" 已删除`);
+                        } else {
+                            payload.write(`groupdel: 删除组失败，组可能不存在`);
+                        }
+                    } catch (error) {
+                        payload.write(`groupdel: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'groupmod':
+                // groupmod 命令：修改用户组（添加/删除成员，修改描述等）
+                (async () => {
+                    try {
+                        // 检查权限
+                        if (typeof UserControl === 'undefined' || !UserControl.isAdmin()) {
+                            payload.write('groupmod: 需要管理员权限');
+                            return;
+                        }
+                        
+                        if (typeof UserGroup === 'undefined') {
+                            payload.write('groupmod: UserGroup 未加载');
+                            return;
+                        }
+                        
+                        if (payload.args.length < 3) {
+                            payload.write('groupmod: 用法: groupmod <组名> <操作> [参数...]');
+                            payload.write('  操作:');
+                            payload.write('    -a <用户名>      : 添加成员到组');
+                            payload.write('    -d <用户名>      : 从组中移除成员');
+                            payload.write('    -m <描述>        : 修改组描述');
+                            return;
+                        }
+                        
+                        const groupName = payload.args[1];
+                        const operation = payload.args[2];
+                        
+                        await UserGroup.ensureInitialized();
+                        
+                        // 检查默认组是否可以修改
+                        if ((groupName === 'admins' || groupName === 'users') && (operation === '-a' || operation === '-d')) {
+                            payload.write(`groupmod: 不能直接修改默认组 "${groupName}" 的成员，请使用其他方式`);
+                            return;
+                        }
+                        
+                        let success = false;
+                        
+                        if (operation === '-a' && payload.args.length >= 4) {
+                            // 添加成员
+                            const username = payload.args[3];
+                            success = await UserGroup.addMember(groupName, username);
+                            if (success) {
+                                payload.write(`groupmod: 已将用户 "${username}" 添加到组 "${groupName}"`);
+                            } else {
+                                payload.write(`groupmod: 添加成员失败，用户或组可能不存在`);
+                            }
+                        } else if (operation === '-d' && payload.args.length >= 4) {
+                            // 删除成员
+                            const username = payload.args[3];
+                            success = await UserGroup.removeMember(groupName, username);
+                            if (success) {
+                                payload.write(`groupmod: 已将用户 "${username}" 从组 "${groupName}" 中移除`);
+                            } else {
+                                payload.write(`groupmod: 移除成员失败，用户或组可能不存在，或用户不在组中`);
+                            }
+                        } else if (operation === '-m' && payload.args.length >= 4) {
+                            // 修改描述
+                            const description = payload.args.slice(3).join(' ');
+                            success = await UserGroup.updateGroupDescription(groupName, description);
+                            if (success) {
+                                payload.write(`groupmod: 组 "${groupName}" 的描述已更新`);
+                            } else {
+                                payload.write(`groupmod: 更新描述失败，组可能不存在`);
+                            }
+                        } else {
+                            payload.write('groupmod: 无效的操作或参数不足');
+                        }
+                    } catch (error) {
+                        payload.write(`groupmod: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'groupinfo':
+                // groupinfo 命令：显示用户组详细信息
+                (async () => {
+                    try {
+                        if (typeof UserGroup === 'undefined') {
+                            payload.write('groupinfo: UserGroup 未加载');
+                            return;
+                        }
+                        
+                        if (payload.args.length < 2) {
+                            payload.write('groupinfo: 用法: groupinfo <组名>');
+                            return;
+                        }
+                        
+                        const groupName = payload.args[1];
+                        
+                        await UserGroup.ensureInitialized();
+                        const group = await UserGroup.getGroup(groupName);
+                        
+                        if (!group) {
+                            payload.write(`groupinfo: 组 "${groupName}" 不存在`);
+                            return;
+                        }
+                        
+                        const typeText = group.type === UserGroup.GROUP_TYPE.ADMIN_GROUP ? '管理员组' : '用户组';
+                        payload.write(`组名: ${group.name}`);
+                        payload.write(`类型: ${typeText}`);
+                        payload.write(`成员数: ${group.members.length}`);
+                        if (group.description) {
+                            payload.write(`描述: ${group.description}`);
+                        }
+                        if (group.createdAt) {
+                            const date = new Date(group.createdAt);
+                            payload.write(`创建时间: ${date.toLocaleString('zh-CN')}`);
+                        }
+                        
+                        if (group.members.length > 0) {
+                            payload.write(`成员列表:`);
+                            for (const member of group.members) {
+                                payload.write(`  - ${member}`);
+                            }
+                        } else {
+                            payload.write('成员列表: (空)');
+                        }
+                    } catch (error) {
+                        payload.write(`groupinfo: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'echo':
+                {
+                    // echo 命令：输出文本
+                    // 支持: echo [文本...] 或 echo -n [文本...] (不换行输出到同一行)
+                    if (payload.args.length < 2) {
+                        // 没有参数，只输出换行
+                        payload.write('');
+                        break;
+                    }
+                    
+                    let args = payload.args.slice(1);
+                    let noNewline = false;
+                    
+                    // 检查 -n 参数
+                    if (args[0] === '-n') {
+                        noNewline = true;
+                        args = args.slice(1);
+                    }
+                    
+                    if (args.length === 0) {
+                        // 只有 -n 参数，不输出任何内容
+                        break;
+                    }
+                    
+                    // 合并所有参数，用空格连接
+                    let output = args.join(' ');
+                    
+                    // 如果整个输出被引号包围，去除首尾引号
+                    // 但保留内部的引号
+                    if (output.length >= 2) {
+                        const first = output[0];
+                        const last = output[output.length - 1];
+                        if ((first === '"' && last === '"') || (first === "'" && last === "'")) {
+                            output = output.slice(1, -1);
+                        }
+                    }
+                    
+                    // 输出文本
+                    // 注意：由于终端 write 方法总是创建新行，-n 参数的效果有限
+                    // 这里我们使用内联样式来实现近似的不换行效果
+                    if (noNewline) {
+                        payload.write({text: output, style: {display: 'inline'}});
+                    } else {
+                        payload.write(output);
+                    }
+                }
+                break;
+            case 'demo':
+                terminalInstance.demo();
+                break;
+            case 'toggleview':
+                terminalInstance.toggleView();
+                break;
+            case 'cd':
+                if(payload.args.length < 2 || payload.args.length > 3){
+                    payload.write('cd: missing operand');
+                }else{
+                    // 异步处理，从 PHP 服务检查目录是否存在
+                    (async () => {
+                        try {
+                            const newPath = payload.args[1];
+                            
+                            // 兼容..返回上级目录
+                            if(newPath === '..'){
+                                if(!payload.env.cwd.includes('/')){
+                                    payload.write('cd: already at root directory');
+                                    return;
+                                }
+                                const parts = payload.env.cwd.split('/');
+                                parts.pop();
+                                const parentPath = parts.join('/');
+                                
+                                // 检查系统盘D:访问权限
+                                if (!checkSystemDiskAccess(parentPath, payload)) {
+                                    return;
+                                }
+                                
+                                payload.env.cwd = parentPath;
+                                terminalInstance.env.cwd = payload.env.cwd;
+                                terminalInstance._saveEnvToMemory(); // 保存到内存
+                                safePoolAdd("KERNEL_GLOBAL_POOL","WORK_SPACE",payload.env.cwd);
+                                terminalInstance._updatePrompt();
+                                return;
+                            }
+                            
+                            const resolved = resolvePath(payload.env.cwd, newPath);
+                            
+                            // 检查系统盘D:访问权限
+                            if (!checkSystemDiskAccess(resolved, payload)) {
+                                return;
+                            }
+                            
+                            // 确保路径格式正确：如果是 A: 到 Z:，转换为 A:/ 到 Z:/（支持所有分区A-Z）
+                            let phpPath = resolved;
+                            if (/^[A-Z]:$/.test(phpPath)) {
+                                phpPath = phpPath + '/';
+                            }
+                            
+                            // 从 PHP 服务检查目录是否存在
+                            const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                    ? SystemInformation.getOrigin()
+                                    : window.location.origin);
+                            url.searchParams.set('action', 'exists');
+                            url.searchParams.set('path', phpPath);
+                            
+                            const response = await fetch(url.toString());
+                            if (!response.ok) {
+                                payload.write(`cd: no such file or directory: ${newPath}`);
+                                return;
+                            }
+                            
+                            const result = await response.json();
+                            if (result.status !== 'success' || !result.data || !result.data.exists || result.data.type !== 'directory') {
+                                payload.write(`cd: no such file or directory: ${newPath}`);
+                                return;
+                            }
+                            
+                            // 目录存在，切换工作目录
+                            payload.env.cwd = resolved;
+                            terminalInstance.env.cwd = payload.env.cwd;
+                            terminalInstance._saveEnvToMemory(); // 保存到内存
+                            safePoolAdd("KERNEL_GLOBAL_POOL","WORK_SPACE",payload.env.cwd);
+                            terminalInstance._updatePrompt();
+                        } catch (error) {
+                            payload.write(`cd: error: ${error.message}`);
+                        }
+                    })();
+                }
+                break;
+            case 'markdir':
+                if(payload.args.length < 2 || payload.args.length > 3){
+                    payload.write('markdir: missing operand');
+                    return;
+                }
+                // 支持传入相对或多级路径，例如: markdir subdir 或 markdir foo/bar
+                const dirArg = payload.args[1];
+                const fullDirPath = resolvePath(payload.env.cwd, dirArg);
+                
+                // 检查系统盘D:访问权限
+                if (!checkSystemDiskAccess(fullDirPath, payload)) {
+                    return;
+                }
+                const partsDir = fullDirPath.split('/');
+                const newName = partsDir.pop();
+                const parentPath = partsDir.join('/') || partsDir[0]; // 如果为空，使用分区根（partsDir[0]）
+                const COLL = safePoolGet('KERNEL_GLOBAL_POOL', fullDirPath.split('/')[0]);
+                // 检查目录是否存在
+                if(COLL.hasNode(fullDirPath)){
+                    payload.write(`markdir: directory "${newName}" already exists`);
+                    return;
+                }
+                // 创建（异步，等待 PHP 操作完成）
+                (async () => {
+                    try {
+                        await COLL.create_dir(parentPath, newName);
+                        payload.write(`markdir: directory "${newName}" created`);
+                    } catch (e) {
+                        payload.write(`markdir: failed to create directory "${newName}": ${e.message || e}`);
+                    }
+                })();
+                break;
+            case 'markfile':
+                if(payload.args.length < 2 || payload.args.length > 3){
+                    payload.write('markfile: missing operand');
+                    return;
+                }
+                // 支持 markfile <name> 或 markfile path/to/name
+                const fArg = payload.args[1];
+                const fullFilePath = resolvePath(payload.env.cwd, fArg);
+                
+                // 检查系统盘D:访问权限
+                if (!checkSystemDiskAccess(fullFilePath, payload)) {
+                    return;
+                }
+                const parts = fullFilePath.split('/');
+                const fname = parts.pop();
+                const parent = parts.join('/') || parts[0];
+                const COLL2 = safePoolGet('KERNEL_GLOBAL_POOL', fullFilePath.split('/')[0]);
+                // 检查文件是否存在
+                const targetNode = COLL2.getNode(parent);
+                if(targetNode && targetNode.attributes && targetNode.attributes[fname]){
+                    payload.write(`markfile: file "${fname}" already exists`);
+                    return;
+                }
+                
+                // 根据扩展名自动识别文件类型
+                const FileTypeRef = safeGetType('FileType');
+                let fileType = FileTypeRef && FileTypeRef.GENRE ? FileTypeRef.GENRE.TEXT : 0; // 默认类型
+                if(FileTypeRef && typeof FileTypeRef.getFileTypeByExtension === 'function'){
+                    fileType = FileTypeRef.getFileTypeByExtension(fname);
+                    // 如果识别为未知类型，使用文本类型作为默认值
+                    if(FileTypeRef.GENRE && fileType === FileTypeRef.GENRE.UNKNOWN){
+                        fileType = FileTypeRef.GENRE.TEXT;
+                    }
+                }
+                
+                // 创建文件对象：优先使用内核提供的 FileFormwork 构造器
+                let fileObj = null;
+                if(typeof FileFormwork !== 'undefined' && FileTypeRef){
+                    try{ 
+                        fileObj = new FileFormwork(fileType, fname, "", parent);
+                        // 记录文件类型识别信息
+                        const typeNames = FileTypeRef.GENRE ? {
+                            [FileTypeRef.GENRE.TEXT]: 'TEXT',
+                            [FileTypeRef.GENRE.IMAGE]: 'IMAGE',
+                            [FileTypeRef.GENRE.CODE]: 'CODE',
+                            [FileTypeRef.GENRE.BINARY]: 'BINARY',
+                            [FileTypeRef.GENRE.JSON]: 'JSON',
+                            [FileTypeRef.GENRE.XML]: 'XML',
+                            [FileTypeRef.GENRE.MARKDOWN]: 'MARKDOWN',
+                            [FileTypeRef.GENRE.CONFIG]: 'CONFIG',
+                            [FileTypeRef.GENRE.DATA]: 'DATA',
+                            [FileTypeRef.GENRE.UNKNOWN]: 'UNKNOWN',
+                        } : {};
+                        const typeName = typeNames[fileType] || 'TEXT';
+                        payload.write(`markfile: 创建文件 "${fname}" (类型: ${typeName})`);
+                    }catch(e){ 
+                        fileObj = null;
+                        payload.write(`markfile: 使用 FileFormwork 创建失败，降级为普通对象: ${e.message || e}`);
+                    }
+                }
+                // 降级对象并设置时间戳
+                if(!fileObj){
+                    fileObj = {
+                        fileName: fname,
+                        fileSize: 0,
+                        fileContent: [],
+                        filePath: parent,
+                        fileBelongDisk: parent.split("/")[0],
+                        fileType: fileType, // 保存识别的文件类型
+                        inited: true,
+                        fileCreatTime: new Date().getTime(),
+                        readFile(){ return this.fileContent.join("\n") + (this.fileContent.length?"\n":""); },
+                        writeFile(newContent){ this.fileContent = []; for(const line of newContent.split(/\n/)) this.fileContent.push(line); this.fileSize = newContent.length; this.fileModifyTime = new Date().getTime(); }
+                    };
+                }
+                // 调用创建（异步，等待 PHP 操作完成）
+                (async () => {
+                    try {
+                        await COLL2.create_file(parent, fileObj);
+                        payload.write(`markfile: file "${fname}" created`);
+                    } catch (e) {
+                        payload.write(`markfile: failed to create file "${fname}": ${e.message || e}`);
+                    }
+                })();
+                break;
+            case 'ls':
+                {
+                    // 异步处理，从 PHP 服务获取真实文件列表
+                    (async () => {
+                        try {
+                            const args = payload.args.slice(1);
+                            const longFlag = args.indexOf('-l') !== -1;
+                            const targetArg = args.find(a => a !== '-l');
+                            let targetPath = payload.env.cwd;
+                            if(targetArg){
+                                targetPath = resolvePath(payload.env.cwd, targetArg);
+                            }
+                            
+                            // 检查系统盘D:访问权限
+                            if (!checkSystemDiskAccess(targetPath, payload)) {
+                                return;
+                            }
+
+                            // 从 PHP 服务获取目录列表
+                            // 确保路径格式正确：如果是 A: 到 Z:，转换为 A:/ 到 Z:/（支持所有分区A-Z）
+                            let phpPath = targetPath;
+                            if (/^[A-Z]:$/.test(phpPath)) {
+                                phpPath = phpPath + '/';
+                            }
+                            const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                    ? SystemInformation.getOrigin()
+                                    : window.location.origin);
+                            url.searchParams.set('action', 'list_dir');
+                            url.searchParams.set('path', phpPath);
+                            
+                            const response = await fetch(url.toString());
+                            if (!response.ok) {
+                                payload.write(`ls: cannot access '${targetArg || targetPath}': ${response.statusText}`);
+                                return;
+                            }
+                            
+                            const result = await response.json();
+                            if (result.status !== 'success' || !result.data || !result.data.items) {
+                                payload.write(`ls: cannot access '${targetArg || targetPath}': ${result.message || 'Unknown error'}`);
+                                return;
+                            }
+                            
+                            const items = result.data.items;
+                            
+                            // 分离目录和文件
+                            const directories = items.filter(item => item.type === 'directory');
+                            const files = items.filter(item => item.type === 'file');
+                            
+                            // 如果没有 -l 标志，简单列出
+                            if (!longFlag) {
+                                if (directories.length === 0 && files.length === 0) {
+                                    payload.write('');
+                                    return;
+                                }
+                                const outParts = [];
+                                for (const dir of directories) outParts.push(dir.name + '/');
+                                for (const file of files) outParts.push(file.name);
+                                payload.write(outParts.join('\t'));
+                                return;
+                            }
+                            
+                            // 长格式列表（带表头）
+                            const owner = payload.env.user || 'root';
+                            payload.write({
+                                html: '<span style="color: #888;">PERMS</span> <span style="color: #888;">LINKS</span> <span style="color: #888;">OWNER</span> <span style="color: #888;">TYPE</span> <span style="color: #888;">SIZE</span> <span style="color: #888;">MODIFIED</span> <span style="color: #888;">NAME</span>',
+                            });
+                            
+                            // 辅助函数：获取文件类型和颜色
+                            const getFileTypeInfo = (filename) => {
+                                let fileType = 'TEXT';
+                                let typeColor = '#e6e6e6';
+                                
+                                const FileTypeRef = safeGetType('FileType');
+                                if (FileTypeRef && typeof FileTypeRef.getFileTypeByExtension === 'function') {
+                                    const typeValue = FileTypeRef.getFileTypeByExtension(filename);
+                                    const typeNames = FileTypeRef.GENRE ? {
+                                        [FileTypeRef.GENRE.TEXT]: 'TEXT',
+                                        [FileTypeRef.GENRE.IMAGE]: 'IMAGE',
+                                        [FileTypeRef.GENRE.CODE]: 'CODE',
+                                        [FileTypeRef.GENRE.BINARY]: 'BINARY',
+                                        [FileTypeRef.GENRE.JSON]: 'JSON',
+                                        [FileTypeRef.GENRE.XML]: 'XML',
+                                        [FileTypeRef.GENRE.MARKDOWN]: 'MARKDOWN',
+                                        [FileTypeRef.GENRE.CONFIG]: 'CONFIG',
+                                        [FileTypeRef.GENRE.DATA]: 'DATA',
+                                    } : {};
+                                    fileType = typeNames[typeValue] || 'TEXT';
+                                    
+                                    const typeColors = {
+                                        'TEXT': '#e6e6e6',
+                                        'IMAGE': '#4a9eff',
+                                        'CODE': '#00ff00',
+                                        'BINARY': '#ff6b6b',
+                                        'JSON': '#ffd93d',
+                                        'XML': '#6bcf7f',
+                                        'MARKDOWN': '#95e1d3',
+                                        'CONFIG': '#f38181',
+                                        'DATA': '#aa96da',
+                                    };
+                                    typeColor = typeColors[fileType] || '#e6e6e6';
+                                }
+                                
+                                return { fileType, typeColor };
+                            };
+                            
+                            const fmtDate = (dateStr) => {
+                                if (!dateStr) return '------------';
+                                const d = new Date(dateStr);
+                                return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')} ${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`;
+                            };
+                            
+                            const rows = [];
+                            
+                            // 目录
+                            for (const dir of directories) {
+                                const perms = 'drwxr-xr-x';
+                                const size = 0;
+                                const mtime = dir.modified || null;
+                                const { fileType, typeColor } = getFileTypeInfo(dir.name);
+                                rows.push({
+                                    html: `${perms} ${String(1).padStart(3,' ')} <span style="color: #4a9eff;">${owner}</span> <span style="color: ${typeColor};">DIR</span> ${String(size).padStart(8,' ')} ${fmtDate(mtime)} <span style="color: #00ff00;">${dir.name}/</span>`,
+                                });
+                            }
+                            
+                            // 文件
+                            for (const file of files) {
+                                const perms = '-rw-r--r--';
+                                const size = file.size || 0;
+                                const mtime = file.modified || null;
+                                const { fileType, typeColor } = getFileTypeInfo(file.name);
+                                rows.push({
+                                    html: `${perms} ${String(1).padStart(3,' ')} <span style="color: #4a9eff;">${owner}</span> <span style="color: ${typeColor};">${fileType.padEnd(8)}</span> ${String(size).padStart(8,' ')} ${fmtDate(mtime)} ${file.name}`,
+                                });
+                            }
+                            
+                            if (rows.length === 0) {
+                                payload.write('');
+                                return;
+                            }
+                            
+                            for (const r of rows) payload.write(r);
+                        } catch (error) {
+                            payload.write(`ls: error: ${error.message}`);
+                        }
+                    })();
+                }
+                break;
+            case 'cat':
+                // 异步处理，从 PHP 服务读取文件
+                (async () => {
+                    try {
+                        // 查看文件，支持相对或绝对路径，支持 -md 参数渲染Markdown
+                        if(payload.args.length < 2){ 
+                            payload.write('cat: missing operand'); 
+                            return; 
+                        }
+                        
+                        const args = payload.args.slice(1);
+                        let markdownMode = false;
+                        let fArg = null;
+                        
+                        // 解析参数
+                        for (const arg of args) {
+                            if (arg === '-md') {
+                                markdownMode = true;
+                            } else if (!arg.startsWith('-')) {
+                                fArg = arg;
+                            }
+                        }
+                        
+                        if (!fArg) {
+                            payload.write('cat: missing file operand');
+                            return;
+                        }
+                        
+                        // 去除参数中的引号（如果存在）
+                        // 因为终端使用简单的空格分割，引号会被包含在参数中
+                        let cleanArg = fArg;
+                        if ((cleanArg.startsWith('"') && cleanArg.endsWith('"')) || 
+                            (cleanArg.startsWith("'") && cleanArg.endsWith("'"))) {
+                            cleanArg = cleanArg.slice(1, -1);
+                        }
+                        
+                        const full = resolvePath(payload.env.cwd, cleanArg);
+                        
+                        // 检查系统盘D:访问权限
+                        if (!checkSystemDiskAccess(full, payload)) {
+                            return;
+                        }
+                        const parts = full.split('/');
+                        const fname = parts.pop();
+                        const parent = parts.join('/') || parts[0];
+                        
+                        // 确保路径格式正确（支持所有分区A-Z）
+                        let phpPath = parent;
+                        if (/^[A-Z]:$/.test(phpPath)) {
+                            phpPath = phpPath + '/';
+                        }
+                        
+                        // 从 PHP 服务读取文件
+                        const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                            ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                            : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                ? SystemInformation.getOrigin()
+                                : window.location.origin);
+                        url.searchParams.set('action', 'read_file');
+                        url.searchParams.set('path', phpPath);
+                        url.searchParams.set('fileName', fname);
+                        
+                        const response = await fetch(url.toString());
+                        if (!response.ok) {
+                            payload.write(`cat: ${fArg}: No such file`);
+                            return;
+                        }
+                        
+                        const result = await response.json();
+                        if (result.status !== 'success' || !result.data || !result.data.content) {
+                            payload.write(`cat: ${fArg}: No such file`);
+                            return;
+                        }
+                        
+                        const content = result.data.content;
+                        
+                        // 如果启用Markdown模式，渲染Markdown
+                        if (markdownMode || (fname.endsWith('.md') || fname.endsWith('.markdown'))) {
+                            const htmlContent = renderMarkdown(content);
+                            payload.write({ html: htmlContent });
+                        } else {
+                            payload.write(content);
+                        }
+                    } catch (error) {
+                        payload.write(`cat: error: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'write':
+                // 写入文件: usage `write filename content...` 或 `write -a filename content...` (append)
+                if(payload.args.length < 3){ payload.write('write: missing operand'); return; }
+                // 异步处理写入操作
+                (async () => {
+                    try {
+                        const FileTypeRef = safeGetType('FileType');
+                    let mode = (FileTypeRef && FileTypeRef.WRITE_MODES) ? FileTypeRef.WRITE_MODES.OVERWRITE : null;
+                    let fileArg = null;
+                    let content = null;
+                    let append = false;
+                    if(payload.args[1] === '-a'){
+                        if(payload.args.length < 4){ payload.write('write: missing operand'); return; }
+                        append = true;
+                        fileArg = payload.args[2];
+                        content = payload.args.slice(3).join(' ');
+                        if(FileTypeRef && FileTypeRef.WRITE_MODES) mode = FileTypeRef.WRITE_MODES.APPEND;
+                    }else{
+                        fileArg = payload.args[1];
+                        content = payload.args.slice(2).join(' ');
+                        if(FileTypeRef && FileTypeRef.WRITE_MODES) mode = FileTypeRef.WRITE_MODES.OVERWRITE;
+                    }
+
+                    const fullPath = resolvePath(payload.env.cwd, fileArg);
+                    
+                    // 检查系统盘D:访问权限
+                    if (!checkSystemDiskAccess(fullPath, payload)) {
+                        return;
+                    }
+                    
+                    const partsF = fullPath.split('/');
+                    const fname = partsF.pop();
+                    const parent = partsF.join('/') || partsF[0];
+                    const COLLw = safePoolGet('KERNEL_GLOBAL_POOL', fullPath.split('/')[0]);
+                    let nodeW = COLLw.getNode(parent);
+                    if(!nodeW){ payload.write(`write: cannot access directory ${parent}`); return; }
+                    // 如果文件不存在，先创建
+                    if(!nodeW.attributes[fname]){
+                        // 根据扩展名自动识别文件类型
+                        const FileTypeRef = safeGetType('FileType');
+                        let fileType = FileTypeRef && FileTypeRef.GENRE ? FileTypeRef.GENRE.TEXT : 0; // 默认类型
+                        if(FileTypeRef && typeof FileTypeRef.getFileTypeByExtension === 'function'){
+                            fileType = FileTypeRef.getFileTypeByExtension(fname);
+                            // 如果识别为未知类型，使用文本类型作为默认值
+                            if(FileTypeRef.GENRE && fileType === FileTypeRef.GENRE.UNKNOWN){
+                                fileType = FileTypeRef.GENRE.TEXT;
+                            }
+                        }
+                        
+                        // 尝试用内核 FileFormwork
+                        let fileObj = null;
+                        if(typeof FileFormwork !== 'undefined' && FileTypeRef){
+                            try{ fileObj = new FileFormwork(fileType, fname, content, parent); }catch(e){ fileObj = null; }
+                        }
+                        if(!fileObj){
+                            const appendMode = FileTypeRef && FileTypeRef.WRITE_MODES ? FileTypeRef.WRITE_MODES.APPEND : 1;
+                            fileObj = {
+                                fileName: fname,
+                                fileSize: content.length,
+                                fileContent: [],
+                                filePath: parent,
+                                fileBelongDisk: parent.split("/")[0],
+                                fileType: fileType, // 保存识别的文件类型
+                                inited: true,
+                                fileCreatTime: new Date().getTime(),
+                                readFile(){ return this.fileContent.join("\n") + (this.fileContent.length?"\n":""); },
+                                writeFile(newContent, writeMod){ if(writeMod === appendMode){ for(const line of newContent.split(/\n/)) this.fileContent.push(line); this.fileSize += newContent.length; } else { this.fileContent = []; for(const line of newContent.split(/\n/)) this.fileContent.push(line); this.fileSize = newContent.length; } this.fileModifyTime = new Date().getTime(); }
+                            };
+                        }
+                            // 创建文件（异步，等待 PHP 操作完成）
+                            await COLLw.create_file(parent, fileObj);
+                            nodeW = COLLw.getNode(parent);
+                        }
+                        const targetFile = nodeW.attributes[fname];
+                        if(!targetFile){ payload.write(`write: cannot create or access file ${fname}`); return; }
+                        try{
+                            // 使用集合提供的写接口，这会调用 Node.optFile 并透传 writeMod
+                            if(typeof COLLw.write_file === 'function'){
+                                // 等待异步写入完成
+                                await COLLw.write_file(parent, fname, content, mode);
+                                payload.write(`write: file "${fname}" written`);
+                            }else{
+                                if(typeof targetFile.writeFile === 'function'){
+                                    targetFile.writeFile(content, mode);
+                                }else{
+                                    targetFile.fileContent = [];
+                                    for(const line of content.split(/\n/)) targetFile.fileContent.push(line);
+                                    targetFile.fileSize = content.length;
+                                    targetFile.fileModifyTime = new Date().getTime();
+                                }
+                                payload.write(`write: ${fname}`);
+                            }
+                        }catch(e){ payload.write(`write: failed to write ${fname}: ${e && e.message ? e.message : e}`); }
+                    } catch (e) {
+                        payload.write(`write: error: ${e && e.message ? e.message : e}`);
+                    }
+                })();
+                break;
+            case 'rm':
+                // 删除文件或者目录，支持路径
+                if(payload.args.length < 2){ payload.write('rm: missing operand'); return; }
+                {
+                    const targ = payload.args[1];
+                    const full = resolvePath(payload.env.cwd, targ);
+                    
+                    // 检查系统盘D:访问权限
+                    if (!checkSystemDiskAccess(full, payload)) {
+                        return;
+                    }
+                    
+                    const root = full.split('/')[0];
+                    const COLLR = safePoolGet('KERNEL_GLOBAL_POOL', root);
+                    try {
+                        // 如果是目录
+                        if(COLLR.hasNode(full)){
+                            COLLR.delete_dir(full);
+                            payload.write(`rm: removed directory ${targ}`);
+                            return;
+                        }
+                        const parts = full.split('/');
+                        const name = parts.pop();
+                        const parent = parts.join('/') || parts[0];
+                        const parentNode = COLLR.getNode(parent);
+                        if(parentNode && parentNode.attributes && parentNode.attributes[name]){
+                            COLLR.delete_file(parent, name);
+                            payload.write(`rm: removed file ${targ}`);
+                            return;
+                        }
+                        payload.write(`rm: cannot remove '${targ}': No such file or directory`);
+                    } catch(e) {
+                        // 捕获属性检查异常
+                        payload.write(`rm: ${e.message || String(e)}`);
+                    }
+                }
+                break;
+            case 'rename':
+                // 重命名文件或目录（仅支持同一分区内重命名）
+                if(payload.args.length < 3){ payload.write('rename: missing operand\nUsage: rename <old_name> <new_name>'); return; }
+                {
+                    const oldName = payload.args[1];
+                    const newName = payload.args[2];
+                    const fullOld = resolvePath(payload.env.cwd, oldName);
+                    const fullNew = resolvePath(payload.env.cwd, newName);
+                    const oldRoot = fullOld.split('/')[0];
+                    const newRoot = fullNew.split('/')[0];
+                    
+                    // 检查是否跨分区（重命名不支持跨分区）
+                    if(oldRoot !== newRoot){
+                        payload.write(`rename: cannot rename across partitions. Source: ${oldRoot}:, Destination: ${newRoot}:`);
+                        return;
+                    }
+                    
+                    const COLLR = safePoolGet('KERNEL_GLOBAL_POOL', oldRoot);
+                    
+                    try {
+                        // 检查新名称是否已经存在
+                        const newParts = fullNew.split('/');
+                        const newParentPath = newParts.slice(0, -1).join('/') || oldRoot;
+                        const newFileName = newParts.pop();
+                        const newParentNode = COLLR.getNode(newParentPath);
+                        if(COLLR.hasNode(fullNew) || (newParentNode && newParentNode.attributes && newParentNode.attributes[newFileName])){
+                            payload.write(`rename: cannot rename '${oldName}': target '${newName}' already exists`);
+                            return;
+                        }
+                        
+                        // 检查是否是目录
+                        if(COLLR.hasNode(fullOld)){
+                            // 重命名目录
+                            const success = COLLR.rename_dir(fullOld, newFileName);
+                            if(success){
+                                payload.write(`rename: renamed directory '${oldName}' to '${newName}'`);
+                            } else {
+                                payload.write(`rename: cannot rename directory '${oldName}'`);
+                            }
+                            return;
+                        }
+                        
+                        // 重命名文件
+                        const parts = fullOld.split('/');
+                        const fileName = parts.pop();
+                        const parent = parts.join('/') || oldRoot;
+                        const parentNode = COLLR.getNode(parent);
+                        if(!parentNode || !parentNode.attributes || !parentNode.attributes[fileName]){
+                            payload.write(`rename: cannot rename '${oldName}': No such file or directory`);
+                            return;
+                        }
+                        
+                        const success = COLLR.rename_file(parent, fileName, newFileName);
+                        if(success){
+                            payload.write(`rename: renamed file '${oldName}' to '${newName}'`);
+                        } else {
+                            payload.write(`rename: cannot rename file '${oldName}'`);
+                        }
+                    } catch(e) {
+                        // 捕获属性检查异常
+                        payload.write(`rename: ${e.message || String(e)}`);
+                    }
+                }
+                break;
+            case 'mv':
+                // 移动文件或目录（支持跨分区移动）
+                if(payload.args.length < 3){ payload.write('mv: missing operand\nUsage: mv <source> <destination>'); return; }
+                {
+                    const source = payload.args[1];
+                    const dest = payload.args[2];
+                    const fullSource = resolvePath(payload.env.cwd, source);
+                    const fullDest = resolvePath(payload.env.cwd, dest);
+                    
+                    // 检查系统盘D:访问权限（源和目标）
+                    if (!checkSystemDiskAccess(fullSource, payload)) {
+                        return;
+                    }
+                    if (!checkSystemDiskAccess(fullDest, payload)) {
+                        return;
+                    }
+                    
+                    const sourceRoot = fullSource.split('/')[0];
+                    const destRoot = fullDest.split('/')[0];
+                    const SOURCE_COLL = safePoolGet('KERNEL_GLOBAL_POOL', sourceRoot);
+                    
+                    // 检查源是否存在
+                    const isDir = SOURCE_COLL.hasNode(fullSource);
+                    const sourceParts = fullSource.split('/');
+                    const sourceFileName = sourceParts.pop();
+                    const sourceParent = sourceParts.join('/') || sourceParts[0];
+                    const sourceNode = SOURCE_COLL.getNode(sourceParent);
+                    const isFile = sourceNode && sourceNode.attributes && sourceNode.attributes[sourceFileName];
+                    
+                    if(!isDir && !isFile){
+                        payload.write(`mv: cannot stat '${source}': No such file or directory`);
+                        return;
+                    }
+                    
+                    // 解析目标路径
+                    const destParts = fullDest.split('/');
+                    let destName = destParts.pop();
+                    let destParent = destParts.join('/') || destParts[0];
+                    
+                    // 获取目标分区的 NodeTreeCollection
+                    const DEST_COLL = safePoolGet('KERNEL_GLOBAL_POOL', destRoot);
+                    
+                    // 如果目标是已存在的目录，将源移动到该目录下
+                    if(DEST_COLL.hasNode(fullDest)){
+                        destParent = fullDest;
+                        destName = sourceFileName;
+                    }
+                    
+                    // 检查目标目录是否存在
+                    if(!DEST_COLL.hasNode(destParent)){
+                        payload.write(`mv: cannot move to '${dest}': No such directory`);
+                        return;
+                    }
+                    
+                    // 检查目标是否已存在
+                    const destParentNode = DEST_COLL.getNode(destParent);
+                    if(destParentNode && destParentNode.attributes && destParentNode.attributes[destName]){
+                        payload.write(`mv: cannot move to '${dest}': File already exists`);
+                        return;
+                    }
+                    if(DEST_COLL.hasNode(destParent === destRoot ? destName : `${destParent}/${destName}`)){
+                        payload.write(`mv: cannot move to '${dest}': Directory already exists`);
+                        return;
+                    }
+                    
+                    // 执行移动
+                    try {
+                        // 如果源和目标在同一分区，使用 move_dir/move_file
+                        if(sourceRoot === destRoot){
+                            if(isDir){
+                                const success = SOURCE_COLL.move_dir(fullSource, destParent, destName);
+                                if(success){
+                                    payload.write(`mv: moved directory '${source}' to '${dest}'`);
+                                } else {
+                                    payload.write(`mv: cannot move directory '${source}'`);
+                                }
+                            } else {
+                                const success = SOURCE_COLL.move_file(sourceParent, sourceFileName, destParent, destName);
+                                if(success){
+                                    payload.write(`mv: moved file '${source}' to '${dest}'`);
+                                } else {
+                                    payload.write(`mv: cannot move file '${source}'`);
+                                }
+                            }
+                        } else {
+                            // 跨分区移动：先复制再删除（仅支持文件，目录需要递归处理）
+                            payload.write(`mv: cross-partition move not supported yet. Use 'copy' and 'rm' instead.`);
+                            return;
+                        }
+                    } catch(e) {
+                        // 捕获属性检查异常
+                        payload.write(`mv: ${e.message || String(e)}`);
+                    }
+                }
+                break;
+            case 'copy':
+                // 复制文件或目录到剪贴板
+                if(payload.args.length < 2){ payload.write('copy: missing operand\nUsage: copy <file|dir>'); return; }
+                {
+                    const source = payload.args[1];
+                    const fullSource = resolvePath(payload.env.cwd, source);
+                    const root = fullSource.split('/')[0];
+                    const COLLR = safePoolGet('KERNEL_GLOBAL_POOL', root);
+                    
+                    // 检查源是否存在
+                    const isDir = COLLR.hasNode(fullSource);
+                    const sourceParts = fullSource.split('/');
+                    const sourceFileName = sourceParts.pop();
+                    const sourceParent = sourceParts.join('/') || sourceParts[0];
+                    const sourceNode = COLLR.getNode(sourceParent);
+                    const isFile = sourceNode && sourceNode.attributes && sourceNode.attributes[sourceFileName];
+                    
+                    if(!isDir && !isFile){
+                        payload.write(`copy: cannot stat '${source}': No such file or directory`);
+                        return;
+                    }
+                    
+                    // 存储到剪贴板（使用 Exploit 内存）
+                    let name;
+                    if(isDir){
+                        // 对于目录，从完整路径中提取目录名
+                        const dirParts = fullSource.split('/');
+                        name = dirParts[dirParts.length - 1];
+                    } else {
+                        name = sourceFileName;
+                    }
+                    const clipboardData = {
+                        type: isDir ? 'dir' : 'file',
+                        source: fullSource,
+                        sourceParent: isDir ? fullSource : sourceParent,
+                        name: name,
+                        root: root
+                    };
+                    
+                    // 保存到 Exploit 内存
+                    if (terminalInstance._saveClipboardToMemory(clipboardData)) {
+                        payload.write(`copy: copied '${source}' to clipboard`);
+                    } else {
+                        payload.write(`copy: failed to save to clipboard`);
+                    }
+                }
+                break;
+            case 'paste':
+                // 从剪贴板粘贴文件或目录（从 Exploit 内存读取）
+                {
+                    const clipboard = terminalInstance._loadClipboardFromMemory();
+                    if(!clipboard){
+                        payload.write('paste: clipboard is empty\nUsage: copy <file|dir> first');
+                        return;
+                    }
+                    
+                    const root = clipboard.root;
+                    const COLLR = safePoolGet('KERNEL_GLOBAL_POOL', root);
+                    const destPath = payload.env.cwd;
+                    
+                    // 检查目标目录是否存在
+                    if(!COLLR.hasNode(destPath)){
+                        payload.write(`paste: cannot paste to '${destPath}': No such directory`);
+                        return;
+                    }
+                    
+                    // 检查目标是否已存在
+                    const destNode = COLLR.getNode(destPath);
+                    try {
+                        if(clipboard.type === 'file'){
+                            if(destNode && destNode.attributes && destNode.attributes[clipboard.name]){
+                                payload.write(`paste: cannot paste '${clipboard.name}': File already exists`);
+                                return;
+                            }
+                            const success = COLLR.copy_file(clipboard.sourceParent, clipboard.name, destPath, clipboard.name);
+                            if(success){
+                                payload.write(`paste: pasted file '${clipboard.name}'`);
+                            } else {
+                                payload.write(`paste: cannot paste file '${clipboard.name}'`);
+                            }
+                        } else {
+                            // 目录
+                            const newPath = destPath === root ? clipboard.name : `${destPath}/${clipboard.name}`;
+                            if(COLLR.hasNode(newPath)){
+                                payload.write(`paste: cannot paste '${clipboard.name}': Directory already exists`);
+                                return;
+                            }
+                            const success = COLLR.copy_dir(clipboard.source, destPath, clipboard.name);
+                            if(success){
+                                payload.write(`paste: pasted directory '${clipboard.name}'`);
+                            } else {
+                                payload.write(`paste: cannot paste directory '${clipboard.name}'`);
+                            }
+                        }
+                    } catch(e) {
+                        // 捕获属性检查异常（例如文件不可读）
+                        payload.write(`paste: ${e.message || String(e)}`);
+                    }
+                }
+                break;
+            case 'kill':
+                {
+                    // kill 命令支持: kill [signal] <pid>
+                    // - kill <pid>: 终止指定程序并释放其内存
+                    // - kill -9 <pid>: 强制终止（与 kill <pid> 相同，保留接口兼容性）
+                    if (payload.args.length < 2) {
+                        payload.write('kill: missing operand');
+                        payload.write('Usage: kill [signal] <pid>');
+                        return;
+                    }
+                    
+                    const args = payload.args.slice(1);
+                    let targetPid = null;
+                    let signal = null;
+                    
+                    // 解析参数
+                    for (let i = 0; i < args.length; i++) {
+                        const arg = args[i];
+                        // 检查是否是信号参数（如 -9, -SIGKILL 等）
+                        if (arg.startsWith('-')) {
+                            signal = arg;
+                            // 提取信号号（如 -9 -> 9）
+                            const signalNum = arg.replace(/^-SIG?/i, '').replace(/^-/, '');
+                            if (isNaN(parseInt(signalNum)) && signalNum !== 'KILL' && signalNum !== 'TERM') {
+                                payload.write(`kill: invalid signal specification: ${arg}`);
+                                return;
+                            }
+                        } else if (!isNaN(parseInt(arg))) {
+                            targetPid = parseInt(arg);
+                        } else {
+                            payload.write(`kill: invalid argument: ${arg}`);
+                            payload.write('Usage: kill [signal] <pid>');
+                            return;
+                        }
+                    }
+                    
+                    if (targetPid === null) {
+                        payload.write('kill: missing PID');
+                        payload.write('Usage: kill [signal] <pid>');
+                        return;
+                    }
+                    
+                    // 优先使用 ProcessManager，如果不可用则降级到 MemoryManager
+                    if (typeof ProcessManager !== 'undefined' && ProcessManager.hasProcess(targetPid)) {
+                        // 使用 ProcessManager 终止程序
+                        const processInfo = ProcessManager.getProcessInfo(targetPid);
+                        if (processInfo) {
+                            payload.write(`终止程序 ${targetPid} (${processInfo.programName})...`);
+                            ProcessManager.killProgram(targetPid, signal === '-9' || signal === '-SIGKILL')
+                                .then(success => {
+                                    if (success) {
+                                        payload.write(`程序 ${targetPid} 已终止`);
+                                    } else {
+                                        payload.write(`kill: 无法终止程序 ${targetPid}`);
+                                    }
+                                })
+                                .catch(e => {
+                                    payload.write(`kill: 终止程序 ${targetPid} 时出错: ${e.message}`);
+                                });
+                        } else {
+                            payload.write(`kill: 程序 ${targetPid} 不存在`);
+                        }
+                    } else if (typeof MemoryManager !== 'undefined') {
+                        // 降级到 MemoryManager（兼容旧代码）
+                        const memoryInfo = MemoryManager.checkMemory(targetPid);
+                        if (memoryInfo === null || memoryInfo.totalPrograms === 0) {
+                            payload.write(`kill: 程序 ${targetPid} 不存在`);
+                            return;
+                        }
+                        
+                        // 显示要终止的程序信息
+                        const program = memoryInfo.programs[0];
+                        const heapCount = program.heaps ? program.heaps.length : 0;
+                        const shedCount = program.sheds ? program.sheds.length : 0;
+                        payload.write(`终止程序 ${targetPid} (${heapCount} 个堆, ${shedCount} 个栈)...`);
+                        
+                        // 释放内存
+                        const success = MemoryManager.freeMemory(targetPid);
+                        if (success) {
+                            payload.write(`程序 ${targetPid} 已终止，内存已释放`);
+                        } else {
+                            payload.write(`kill: 无法终止程序 ${targetPid}`);
+                        }
+                    } else {
+                        payload.write('kill: ProcessManager 和 MemoryManager 都不可用');
+                    }
+                }
+                break;
+            // ps 命令已移至 bin/ps.js，由终端命令解析器自动处理
+            case 'tree':
+                {
+                    // 异步处理，从 PHP 服务获取真实文件系统树
+                    (async () => {
+                        try {
+                            // tree 命令支持: tree [path] [-L depth]
+                            // - tree: 显示当前目录的树状结构
+                            // - tree <path>: 显示指定路径的树状结构
+                            // - tree -L <depth>: 限制显示深度
+                            const args = payload.args.slice(1);
+                            let targetPath = payload.env.cwd;
+                            let maxDepth = -1; // -1 表示无限制
+                            
+                            // 解析参数
+                            for (let i = 0; i < args.length; i++) {
+                                const arg = args[i];
+                                if (arg === '-L' && i + 1 < args.length) {
+                                    const depth = parseInt(args[i + 1]);
+                                    if (!isNaN(depth) && depth > 0) {
+                                        maxDepth = depth;
+                                        i++; // 跳过下一个参数
+                                    }
+                                } else if (!arg.startsWith('-')) {
+                                    targetPath = resolvePath(payload.env.cwd, arg);
+                                }
+                            }
+                            
+                            // 辅助函数：从 PHP 服务获取目录列表
+                            const getDirectoryList = async (path) => {
+                                // 确保路径格式正确：如果是 D: 或 C:，转换为 D:/ 或 C:/
+                                let phpPath = path;
+                                if (/^[A-Z]:$/.test(phpPath)) {
+                                    phpPath = phpPath + '/';
+                                }
+                                const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                    ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                    : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                        ? SystemInformation.getOrigin()
+                                        : window.location.origin);
+                                url.searchParams.set('action', 'list_dir');
+                                url.searchParams.set('path', phpPath);
+                                
+                                const response = await fetch(url.toString());
+                                if (!response.ok) {
+                                    return null;
+                                }
+                                
+                                const result = await response.json();
+                                if (result.status !== 'success' || !result.data || !result.data.items) {
+                                    return null;
+                                }
+                                
+                                return result.data.items;
+                            };
+                            
+                            // 检查目标目录是否存在
+                            const initialItems = await getDirectoryList(targetPath);
+                            if (!initialItems) {
+                                payload.write(`tree: cannot access '${targetPath}': No such file or directory`);
+                                return;
+                            }
+                    
+                            // 辅助函数：获取文件类型和颜色
+                            const getFileTypeInfo = (filename) => {
+                                let fileType = 'TEXT';
+                                let typeColor = '#e6e6e6';
+                                
+                                const FileTypeRef = safeGetType('FileType');
+                                if (FileTypeRef && typeof FileTypeRef.getFileTypeByExtension === 'function') {
+                                    const typeValue = FileTypeRef.getFileTypeByExtension(filename);
+                                    const typeNames = FileTypeRef.GENRE ? {
+                                        [FileTypeRef.GENRE.TEXT]: 'TEXT',
+                                        [FileTypeRef.GENRE.IMAGE]: 'IMAGE',
+                                        [FileTypeRef.GENRE.CODE]: 'CODE',
+                                        [FileTypeRef.GENRE.BINARY]: 'BINARY',
+                                        [FileTypeRef.GENRE.JSON]: 'JSON',
+                                        [FileTypeRef.GENRE.XML]: 'XML',
+                                        [FileTypeRef.GENRE.MARKDOWN]: 'MARKDOWN',
+                                        [FileTypeRef.GENRE.CONFIG]: 'CONFIG',
+                                        [FileTypeRef.GENRE.DATA]: 'DATA',
+                                    } : {};
+                                    fileType = typeNames[typeValue] || 'TEXT';
+                                    
+                                    const typeColors = {
+                                        'TEXT': '#e6e6e6',
+                                        'IMAGE': '#4a9eff',
+                                        'CODE': '#00ff00',
+                                        'BINARY': '#ff6b6b',
+                                        'JSON': '#ffd93d',
+                                        'XML': '#6bcf7f',
+                                        'MARKDOWN': '#95e1d3',
+                                        'CONFIG': '#f38181',
+                                        'DATA': '#aa96da',
+                                    };
+                                    typeColor = typeColors[fileType] || '#e6e6e6';
+                                }
+                                
+                                return { fileType, typeColor };
+                            };
+                            
+                            // 递归构建树结构
+                            const buildTree = async (path, prefix = '', isLast = true, depth = 0) => {
+                                if (maxDepth >= 0 && depth > maxDepth) {
+                                    return;
+                                }
+                                
+                                const items = await getDirectoryList(path);
+                                if (!items) {
+                                    return;
+                                }
+                                
+                                // 分离目录和文件
+                                const directories = items.filter(item => item.type === 'directory');
+                                const files = items.filter(item => item.type === 'file');
+                                const allItems = [...directories, ...files];
+                                
+                                // 显示当前目录名（只在第一次调用时显示）
+                                if (depth === 0) {
+                                    const pathParts = path.split('/');
+                                    const dirName = pathParts[pathParts.length - 1] || path;
+                                    payload.write({
+                                        html: `<span style="color: #00ff00; font-weight: bold; font-size: 1.1em;">${dirName}</span>`,
+                                    });
+                                }
+                                
+                                // 遍历所有项目
+                                for (let i = 0; i < allItems.length; i++) {
+                                    const item = allItems[i];
+                                    const isLastItem = i === allItems.length - 1;
+                                    const connector = isLastItem ? '<span style="color: #888;">└──</span> ' : '<span style="color: #888;">├──</span> ';
+                                    const nextPrefix = isLastItem ? prefix + '<span style="color: #888;">    </span>' : prefix + '<span style="color: #888;">│   </span>';
+                                    
+                                    if (item.type === 'directory') {
+                                        // 目录
+                                        const dirName = item.name;
+                                        const dirPath = item.path || (path + '/' + dirName);
+                                        
+                                        payload.write({
+                                            html: `${prefix}${connector}<span style="color: #00ff00; font-weight: bold;">${dirName}/</span> <span style="color: #00ff00; font-size: 0.85em; opacity: 0.8;">[DIR]</span>`,
+                                        });
+                                        
+                                        // 递归处理子目录
+                                        await buildTree(dirPath, nextPrefix, isLastItem, depth + 1);
+                                    } else {
+                                        // 文件
+                                        const fileName = item.name;
+                                        const { fileType, typeColor } = getFileTypeInfo(fileName);
+                                        const size = item.size || 0;
+                                        
+                                        // 格式化文件大小
+                                        let sizeStr = size.toString();
+                                        if (size >= 1024 * 1024) {
+                                            sizeStr = (size / (1024 * 1024)).toFixed(2) + 'M';
+                                        } else if (size >= 1024) {
+                                            sizeStr = (size / 1024).toFixed(2) + 'K';
+                                        }
+                                        
+                                        payload.write({
+                                            html: `${prefix}${connector}<span style="color: ${typeColor};">${fileName}</span> <span style="color: #888; font-size: 0.8em; opacity: 0.7;">(${sizeStr}, ${fileType})</span>`,
+                                        });
+                                    }
+                                }
+                            };
+                            
+                            // 统计信息
+                            let dirCount = 0;
+                            let fileCount = 0;
+                            
+                            const countItems = async (path, depth = 0) => {
+                                if (maxDepth >= 0 && depth > maxDepth) return;
+                                
+                                const items = await getDirectoryList(path);
+                                if (!items) return;
+                                
+                                const directories = items.filter(item => item.type === 'directory');
+                                const files = items.filter(item => item.type === 'file');
+                                
+                                dirCount += directories.length;
+                                fileCount += files.length;
+                                
+                                for (const dir of directories) {
+                                    const dirPath = dir.path || (path + '/' + dir.name);
+                                    await countItems(dirPath, depth + 1);
+                                }
+                            };
+                            
+                            await countItems(targetPath);
+                            
+                            // 显示树结构
+                            await buildTree(targetPath);
+                            
+                            // 显示统计信息
+                            payload.write('');
+                            payload.write({
+                                html: `<span style="color: #888;">${dirCount} directories, ${fileCount} files</span>`,
+                            });
+                        } catch (error) {
+                            payload.write(`tree: error: ${error.message}`);
+                        }
+                    })();
+                }
+                break;
+            case 'check':
+                {
+                    // check 命令：全面自检内核并给出详细的检查报告
+                    payload.write('=== ZerOS 内核自检报告 ===');
+                    payload.write('');
+                    
+                    const report = [];
+                    let totalChecks = 0;
+                    let passedChecks = 0;
+                    let failedChecks = 0;
+                    let warnings = 0;
+                    
+                    // 检查函数辅助
+                    const check = (name, condition, details = '') => {
+                        totalChecks++;
+                        if (condition) {
+                            passedChecks++;
+                            report.push(`[✓] ${name}: 正常${details ? ' - ' + details : ''}`);
+                        } else {
+                            failedChecks++;
+                            report.push(`[✗] ${name}: 失败${details ? ' - ' + details : ''}`);
+                        }
+                    };
+                    
+                    const warn = (name, message) => {
+                        warnings++;
+                        report.push(`[!] ${name}: 警告 - ${message}`);
+                    };
+                    
+                    const info = (name, message) => {
+                        report.push(`[i] ${name}: ${message}`);
+                    };
+                    
+                    // ========== 1. 核心模块检查 ==========
+                    report.push('');
+                    report.push('--- 核心模块检查 ---');
+                    
+                    // KernelLogger
+                    check('KernelLogger', typeof KernelLogger !== 'undefined', 
+                        typeof KernelLogger !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof KernelLogger !== 'undefined') {
+                        check('KernelLogger.info', typeof KernelLogger.info === 'function');
+                        check('KernelLogger.error', typeof KernelLogger.error === 'function');
+                        check('KernelLogger.warn', typeof KernelLogger.warn === 'function');
+                        check('KernelLogger.debug', typeof KernelLogger.debug === 'function');
+                    }
+                    
+                    // DependencyConfig
+                    check('DependencyConfig', typeof DependencyConfig !== 'undefined',
+                        typeof DependencyConfig !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof DependencyConfig !== 'undefined') {
+                        check('DependencyConfig.generate', typeof DependencyConfig.generate === 'function');
+                        check('DependencyConfig.publishSignal', typeof DependencyConfig.publishSignal === 'function');
+                    }
+                    
+                    // POOL
+                    check('POOL', typeof POOL !== 'undefined',
+                        typeof POOL !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof POOL !== 'undefined') {
+                        check('POOL.__GET__', typeof POOL.__GET__ === 'function');
+                        check('POOL.__ADD__', typeof POOL.__ADD__ === 'function');
+                        check('POOL.__INIT__', typeof POOL.__INIT__ === 'function');
+                        check('POOL.__HAS__', typeof POOL.__HAS__ === 'function');
+                        
+                        // 检查 POOL 初始化状态
+                        try {
+                            // 使用 __HAS__ 方法检查类别是否存在（更可靠）
+                            const categoryExists = typeof POOL.__HAS__ === 'function' && POOL.__HAS__("KERNEL_GLOBAL_POOL");
+                            
+                            if (categoryExists) {
+                                const dependency = POOL.__GET__("KERNEL_GLOBAL_POOL", "Dependency");
+                                // dependency 可能是 undefined（如果未添加），但不应该是 { isInit: false }
+                                const isDependencyValid = dependency !== undefined && 
+                                                         dependency !== null && 
+                                                         (typeof dependency !== 'object' || 
+                                                          dependency.isInit !== false);
+                                check('POOL.KERNEL_GLOBAL_POOL.Dependency', isDependencyValid,
+                                    isDependencyValid ? '已注册' : '未注册');
+                                
+                                const workspace = POOL.__GET__("KERNEL_GLOBAL_POOL", "WORK_SPACE");
+                                check('POOL.KERNEL_GLOBAL_POOL.WORK_SPACE', typeof workspace === 'string' && workspace.length > 0,
+                                    workspace ? `当前值: ${workspace}` : '未设置');
+                            } else {
+                                warn('POOL.KERNEL_GLOBAL_POOL', '类别未初始化');
+                            }
+                        } catch (e) {
+                            warn('POOL.KERNEL_GLOBAL_POOL', `访问失败: ${e.message}`);
+                        }
+                    }
+                    
+                    // ========== 2. 枚举管理器检查 ==========
+                    report.push('');
+                    report.push('--- 枚举管理器检查 ---');
+                    
+                    check('EnumManager', typeof EnumManager !== 'undefined',
+                        typeof EnumManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof EnumManager !== 'undefined') {
+                        check('EnumManager.createEnum', typeof EnumManager.createEnum === 'function');
+                        check('EnumManager.getEnum', typeof EnumManager.getEnum === 'function');
+                        check('EnumManager.hasEnum', typeof EnumManager.hasEnum === 'function');
+                    }
+                    
+                    // FileType（从 POOL 或全局对象获取）
+                    let FileType = null;
+                    if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+                        try {
+                            FileType = POOL.__GET__("TYPE_POOL", "FileType");
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                    }
+                    if (!FileType && typeof window !== 'undefined' && window.FileType) {
+                        FileType = window.FileType;
+                    }
+                    if (!FileType && typeof globalThis !== 'undefined' && globalThis.FileType) {
+                        FileType = globalThis.FileType;
+                    }
+                    
+                    check('FileType', FileType !== null && FileType !== undefined,
+                        FileType ? '已加载（从 POOL 或全局对象）' : '未加载');
+                    if (FileType) {
+                        check('FileType.GENRE', typeof FileType.GENRE !== 'undefined',
+                            FileType.GENRE ? `${Object.keys(FileType.GENRE).length} 个类型` : '未定义');
+                        check('FileType.DIR_OPS', typeof FileType.DIR_OPS !== 'undefined',
+                            FileType.DIR_OPS ? `${Object.keys(FileType.DIR_OPS).length} 个操作` : '未定义');
+                        check('FileType.FILE_OPS', typeof FileType.FILE_OPS !== 'undefined',
+                            FileType.FILE_OPS ? `${Object.keys(FileType.FILE_OPS).length} 个操作` : '未定义');
+                        check('FileType.WRITE_MODES', typeof FileType.WRITE_MODES !== 'undefined',
+                            FileType.WRITE_MODES ? `${Object.keys(FileType.WRITE_MODES).length} 个模式` : '未定义');
+                    }
+                    
+                    // LogLevel（从 POOL 或全局对象获取）
+                    let LogLevel = null;
+                    if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+                        try {
+                            LogLevel = POOL.__GET__("TYPE_POOL", "LogLevel");
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                    }
+                    if (!LogLevel && typeof window !== 'undefined' && window.LogLevel) {
+                        LogLevel = window.LogLevel;
+                    }
+                    if (!LogLevel && typeof globalThis !== 'undefined' && globalThis.LogLevel) {
+                        LogLevel = globalThis.LogLevel;
+                    }
+                    
+                    check('LogLevel', LogLevel !== null && LogLevel !== undefined,
+                        LogLevel ? '已加载（从 POOL 或全局对象）' : '未加载');
+                    if (LogLevel) {
+                        check('LogLevel.LEVEL', typeof LogLevel.LEVEL !== 'undefined',
+                            LogLevel.LEVEL ? `${Object.keys(LogLevel.LEVEL).length} 个级别` : '未定义');
+                    }
+                    
+                    // AddressType（从 POOL 或全局对象获取）
+                    let AddressType = null;
+                    if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+                        try {
+                            AddressType = POOL.__GET__("TYPE_POOL", "AddressType");
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                    }
+                    if (!AddressType && typeof window !== 'undefined' && window.AddressType) {
+                        AddressType = window.AddressType;
+                    }
+                    if (!AddressType && typeof globalThis !== 'undefined' && globalThis.AddressType) {
+                        AddressType = globalThis.AddressType;
+                    }
+                    
+                    check('AddressType', AddressType !== null && AddressType !== undefined,
+                        AddressType ? '已加载（从 POOL 或全局对象）' : '未加载');
+                    if (AddressType) {
+                        check('AddressType.TYPE', typeof AddressType.TYPE !== 'undefined',
+                            AddressType.TYPE ? `${Object.keys(AddressType.TYPE).length} 个类型` : '未定义');
+                    }
+                    
+                    // ========== 3. 文件系统检查 ==========
+                    report.push('');
+                    report.push('--- 文件系统检查 ---');
+                    
+                    check('Disk', typeof Disk !== 'undefined',
+                        typeof Disk !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof Disk !== 'undefined') {
+                        check('Disk.init', typeof Disk.init === 'function');
+                        check('Disk.format', typeof Disk.format === 'function');
+                        check('Disk.canUsed', Disk.canUsed === true, 
+                            Disk.canUsed ? '可用' : '不可用');
+                        
+                        // 检查磁盘分区
+                        if (Disk.diskSeparateMap) {
+                            const partitions = Array.from(Disk.diskSeparateMap.keys());
+                            info('磁盘分区', `${partitions.length} 个分区: ${partitions.join(', ')}`);
+                            partitions.forEach(part => {
+                                const size = Disk.diskSeparateSize.get(part);
+                                const free = Disk.diskFreeMap.get(part);
+                                if (size !== undefined && free !== undefined) {
+                                    const used = size - free;
+                                    const percent = ((used / size) * 100).toFixed(2);
+                                    info(`  分区 ${part}`, `总大小: ${(size / 1024 / 1024).toFixed(2)} MB, 已用: ${(used / 1024 / 1024).toFixed(2)} MB (${percent}%), 可用: ${(free / 1024 / 1024).toFixed(2)} MB`);
+                                }
+                            });
+                        }
+                    }
+                    
+                    check('NodeTreeCollection', typeof NodeTreeCollection !== 'undefined',
+                        typeof NodeTreeCollection !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof NodeTreeCollection !== 'undefined') {
+                        check('NodeTreeCollection 构造函数', typeof NodeTreeCollection === 'function');
+                    }
+                    
+                    // FileFramework (实际类名是 FileFormwork，拼写错误但保持兼容)
+                    // 尝试从多个位置获取
+                    let FileFramework = null;
+                    // 1. 尝试从 POOL 获取
+                    if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+                        try {
+                            FileFramework = POOL.__GET__("KERNEL_GLOBAL_POOL", "FileFormwork");
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                    }
+                    // 2. 尝试从全局对象获取（使用错误的拼写）
+                    if (!FileFramework && typeof window !== 'undefined' && window.FileFormwork) {
+                        FileFramework = window.FileFormwork;
+                    }
+                    if (!FileFramework && typeof globalThis !== 'undefined' && globalThis.FileFormwork) {
+                        FileFramework = globalThis.FileFormwork;
+                    }
+                    // 3. 尝试使用正确的拼写（如果将来修复了）
+                    if (!FileFramework && typeof window !== 'undefined' && window.FileFramework) {
+                        FileFramework = window.FileFramework;
+                    }
+                    if (!FileFramework && typeof globalThis !== 'undefined' && globalThis.FileFramework) {
+                        FileFramework = globalThis.FileFramework;
+                    }
+                    
+                    // FileFramework 不是关键模块，失败不影响系统运行
+                    check('FileFramework', FileFramework !== null && FileFramework !== undefined, false);
+                    if (FileFramework) {
+                        check('FileFramework 构造函数', typeof FileFramework === 'function');
+                    } else {
+                        // FileFramework 可能还未加载，这是正常的
+                        info('FileFramework', '模块可能还未加载（非关键模块）');
+                    }
+                    
+                    check('LStorage', typeof LStorage !== 'undefined',
+                        typeof LStorage !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof LStorage !== 'undefined') {
+                        check('LStorage.setSystemStorage', typeof LStorage.setSystemStorage === 'function');
+                        check('LStorage.getSystemStorage', typeof LStorage.getSystemStorage === 'function');
+                    }
+                    
+                    // ========== 4. 内存管理检查 ==========
+                    report.push('');
+                    report.push('--- 内存管理检查 ---');
+                    
+                    check('MemoryManager', typeof MemoryManager !== 'undefined',
+                        typeof MemoryManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof MemoryManager !== 'undefined') {
+                        check('MemoryManager.allocateMemory', typeof MemoryManager.allocateMemory === 'function');
+                        check('MemoryManager.freeMemory', typeof MemoryManager.freeMemory === 'function');
+                        check('MemoryManager.checkMemory', typeof MemoryManager.checkMemory === 'function');
+                        check('MemoryManager.registerProgramName', typeof MemoryManager.registerProgramName === 'function');
+                        
+                        // 检查内存使用情况
+                        try {
+                            const memoryInfo = MemoryManager.checkMemory();
+                            if (memoryInfo) {
+                                const totalHeaps = memoryInfo.totalHeaps !== undefined ? memoryInfo.totalHeaps : 
+                                                  (memoryInfo.programs ? memoryInfo.programs.reduce((sum, p) => sum + (p.heaps ? p.heaps.length : 0), 0) : 0);
+                                const totalSheds = memoryInfo.totalSheds !== undefined ? memoryInfo.totalSheds : 
+                                                  (memoryInfo.programs ? memoryInfo.programs.reduce((sum, p) => sum + (p.sheds ? p.sheds.length : 0), 0) : 0);
+                                info('内存统计', `总程序数: ${memoryInfo.totalPrograms || 0}, 总堆数: ${totalHeaps}, 总栈数: ${totalSheds}`);
+                                if (memoryInfo.programs && memoryInfo.programs.length > 0) {
+                                    memoryInfo.programs.forEach(prog => {
+                                        const progName = MemoryManager.getProgramName ? MemoryManager.getProgramName(prog.pid) : (prog.name || '未命名');
+                                        info(`  程序 PID ${prog.pid}`, `${progName}: ${prog.heaps ? prog.heaps.length : 0} 个堆, ${prog.sheds ? prog.sheds.length : 0} 个栈`);
+                                    });
+                                }
+                            }
+                        } catch (e) {
+                            warn('内存统计', `获取失败: ${e.message}`);
+                        }
+                    }
+                    
+                    check('Heap', typeof Heap !== 'undefined',
+                        typeof Heap !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof Heap !== 'undefined') {
+                        check('Heap 构造函数', typeof Heap === 'function');
+                    }
+                    
+                    check('Shed', typeof Shed !== 'undefined',
+                        typeof Shed !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof Shed !== 'undefined') {
+                        check('Shed 构造函数', typeof Shed === 'function');
+                    }
+                    
+                    // ========== 5. 进程管理检查 ==========
+                    report.push('');
+                    report.push('--- 进程管理检查 ---');
+                    
+                    check('ProcessManager', typeof ProcessManager !== 'undefined',
+                        typeof ProcessManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof ProcessManager !== 'undefined') {
+                        check('ProcessManager.startProgram', typeof ProcessManager.startProgram === 'function');
+                        check('ProcessManager.killProgram', typeof ProcessManager.killProgram === 'function');
+                        check('ProcessManager.getProcessInfo', typeof ProcessManager.getProcessInfo === 'function');
+                        check('ProcessManager.listProcesses', typeof ProcessManager.listProcesses === 'function');
+                        
+                        // 检查进程表
+                        try {
+                            const processTable = ProcessManager.PROCESS_TABLE;
+                            if (processTable && processTable.size > 0) {
+                                info('运行中的进程', `${processTable.size} 个`);
+                                processTable.forEach((processInfo, pid) => {
+                                    const status = processInfo.status || 'unknown';
+                                    const name = processInfo.programName || '未命名';
+                                    info(`  PID ${pid}`, `${name} (${status})`);
+                                });
+                            } else {
+                                info('运行中的进程', '无');
+                            }
+                        } catch (e) {
+                            warn('进程表', `访问失败: ${e.message}`);
+                        }
+                    }
+                    
+                    // ApplicationAssetManager
+                    check('ApplicationAssetManager', typeof ApplicationAssetManager !== 'undefined',
+                        typeof ApplicationAssetManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof ApplicationAssetManager !== 'undefined') {
+                        check('ApplicationAssetManager.getProgramInfo', typeof ApplicationAssetManager.getProgramInfo === 'function');
+                        check('ApplicationAssetManager.listPrograms', typeof ApplicationAssetManager.listPrograms === 'function');
+                        check('ApplicationAssetManager.getAutoStartPrograms', typeof ApplicationAssetManager.getAutoStartPrograms === 'function');
+                        
+                        // 检查已注册的程序
+                        try {
+                            const programs = ApplicationAssetManager.listPrograms();
+                            if (programs && programs.length > 0) {
+                                info('已注册的程序', `${programs.length} 个: ${programs.join(', ')}`);
+                            } else {
+                                info('已注册的程序', '无');
+                            }
+                        } catch (e) {
+                            warn('程序列表', `获取失败: ${e.message}`);
+                        }
+                    }
+                    
+                    // KernelMemory
+                    check('KernelMemory', typeof KernelMemory !== 'undefined',
+                        typeof KernelMemory !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof KernelMemory !== 'undefined') {
+                        check('KernelMemory.saveData', typeof KernelMemory.saveData === 'function');
+                        check('KernelMemory.loadData', typeof KernelMemory.loadData === 'function');
+                        check('KernelMemory.hasData', typeof KernelMemory.hasData === 'function');
+                        check('KernelMemory.getMemoryUsage', typeof KernelMemory.getMemoryUsage === 'function');
+                        
+                        // 检查Exploit程序内存使用情况
+                        try {
+                            const memoryUsage = KernelMemory.getMemoryUsage();
+                            if (memoryUsage) {
+                                info('Exploit程序内存', `Heap: ${memoryUsage.heapUsed || 0}/${memoryUsage.heapTotal || 0} bytes, Shed: ${memoryUsage.shedUsed || 0}/${memoryUsage.shedTotal || 0} bytes`);
+                            }
+                        } catch (e) {
+                            warn('内存使用情况', `获取失败: ${e.message}`);
+                        }
+                    }
+                    
+                    // ========== 6. GUI 管理检查 ==========
+                    report.push('');
+                    report.push('--- GUI 管理检查 ---');
+                    
+                    check('GUIManager', typeof GUIManager !== 'undefined',
+                        typeof GUIManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof GUIManager !== 'undefined') {
+                        check('GUIManager.registerWindow', typeof GUIManager.registerWindow === 'function');
+                        check('GUIManager.unregisterWindow', typeof GUIManager.unregisterWindow === 'function');
+                    }
+                    
+                    check('ThemeManager', typeof ThemeManager !== 'undefined',
+                        typeof ThemeManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof ThemeManager !== 'undefined') {
+                        check('ThemeManager.setTheme', typeof ThemeManager.setTheme === 'function');
+                        check('ThemeManager.getCurrentTheme', typeof ThemeManager.getCurrentTheme === 'function');
+                        check('ThemeManager.setDesktopBackground', typeof ThemeManager.setDesktopBackground === 'function');
+                        check('ThemeManager.setLocalImageAsBackground', typeof ThemeManager.setLocalImageAsBackground === 'function');
+                        check('ThemeManager.getCurrentDesktopBackground', typeof ThemeManager.getCurrentDesktopBackground === 'function');
+                        check('ThemeManager.getAllDesktopBackgrounds', typeof ThemeManager.getAllDesktopBackgrounds === 'function');
+                        try {
+                            const currentTheme = ThemeManager.getCurrentTheme();
+                            if (currentTheme) {
+                                info('当前主题', typeof currentTheme === 'object' ? currentTheme.id || currentTheme.name || '未知' : currentTheme);
+                            }
+                            const currentBg = ThemeManager.getCurrentDesktopBackground ? ThemeManager.getCurrentDesktopBackground() : null;
+                            if (currentBg) {
+                                // 检查是否为 GIF 动图背景
+                                const bgInfo = ThemeManager.getDesktopBackground ? ThemeManager.getDesktopBackground(currentBg) : null;
+                                const isGif = bgInfo && bgInfo.path && bgInfo.path.toLowerCase().endsWith('.gif');
+                                info('当前桌面背景', `${currentBg}${isGif ? ' (GIF动图)' : ''}`);
+                            }
+                            // 检查支持的背景格式
+                            const allBackgrounds = ThemeManager.getAllDesktopBackgrounds ? ThemeManager.getAllDesktopBackgrounds() : [];
+                            if (allBackgrounds && allBackgrounds.length > 0) {
+                                const gifCount = allBackgrounds.filter(bg => bg && bg.path && bg.path.toLowerCase().endsWith('.gif')).length;
+                                const staticCount = allBackgrounds.length - gifCount;
+                                info('桌面背景统计', `总计: ${allBackgrounds.length} 个 (静态: ${staticCount}, GIF动图: ${gifCount})`);
+                            }
+                        } catch (e) {
+                            warn('主题信息', `获取失败: ${e.message}`);
+                        }
+                    }
+                    
+                    check('DesktopManager', typeof DesktopManager !== 'undefined',
+                        typeof DesktopManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof DesktopManager !== 'undefined') {
+                        check('DesktopManager.init', typeof DesktopManager.init === 'function');
+                        check('DesktopManager.addShortcut', typeof DesktopManager.addShortcut === 'function');
+                    }
+                    
+                    check('TaskbarManager', typeof TaskbarManager !== 'undefined',
+                        typeof TaskbarManager !== 'undefined' ? '已加载' : '未加载');
+                    check('ContextMenuManager', typeof ContextMenuManager !== 'undefined',
+                        typeof ContextMenuManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof ContextMenuManager !== 'undefined') {
+                        check('ContextMenuManager.registerContextMenu', typeof ContextMenuManager.registerContextMenu === 'function');
+                        check('ContextMenuManager.registerMenu', typeof ContextMenuManager.registerMenu === 'function');
+                    }
+                    check('EventManager', typeof EventManager !== 'undefined',
+                        typeof EventManager !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof EventManager !== 'undefined') {
+                        check('EventManager.registerDrag', typeof EventManager.registerDrag === 'function');
+                        check('EventManager.registerResizer', typeof EventManager.registerResizer === 'function');
+                        check('EventManager.registerMenu', typeof EventManager.registerMenu === 'function');
+                    }
+                    
+                    // ========== 7. 系统信息检查 ==========
+                    report.push('');
+                    report.push('--- 系统信息检查 ---');
+                    
+                    check('SystemInformation', typeof SystemInformation !== 'undefined',
+                        typeof SystemInformation !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof SystemInformation !== 'undefined') {
+                        check('SystemInformation.getSystemVersion', typeof SystemInformation.getSystemVersion === 'function');
+                        check('SystemInformation.getKernelVersion', typeof SystemInformation.getKernelVersion === 'function');
+                        check('SystemInformation.getDevelopers', typeof SystemInformation.getDevelopers === 'function');
+                        try {
+                            const sysVersion = SystemInformation.getSystemVersion();
+                            const kernelVersion = SystemInformation.getKernelVersion();
+                            info('系统版本', sysVersion);
+                            info('内核版本', kernelVersion);
+                        } catch (e) {
+                            warn('系统信息', `获取失败: ${e.message}`);
+                        }
+                    }
+                    
+                    // NetworkManager 是一个实例，不是类
+                    let networkManager = null;
+                    if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+                        try {
+                            networkManager = POOL.__GET__("KERNEL_GLOBAL_POOL", "NetworkManager");
+                        } catch (e) {
+                            // 忽略错误
+                        }
+                    }
+                    if (!networkManager && typeof window !== 'undefined' && window.NetworkManager) {
+                        networkManager = window.NetworkManager;
+                    }
+                    if (!networkManager && typeof globalThis !== 'undefined' && globalThis.NetworkManager) {
+                        networkManager = globalThis.NetworkManager;
+                    }
+                    
+                    check('NetworkManager', networkManager !== null && networkManager !== undefined,
+                        networkManager ? '已加载' : '未加载');
+                    if (networkManager) {
+                        check('NetworkManager.isOnline', typeof networkManager.isOnline === 'function');
+                        check('NetworkManager.getConnectionInfo', typeof networkManager.getConnectionInfo === 'function');
+                        check('NetworkManager.getNetworkStateSnapshot', typeof networkManager.getNetworkStateSnapshot === 'function');
+                        try {
+                            const isOnline = networkManager.isOnline();
+                            const connectionInfo = networkManager.getConnectionInfo();
+                            info('网络状态', isOnline ? '在线' : '离线');
+                            if (connectionInfo) {
+                                info('连接信息', JSON.stringify(connectionInfo));
+                            }
+                        } catch (e) {
+                            warn('网络状态', `获取失败: ${e.message}`);
+                        }
+                    }
+                    
+                    check('DynamicManager', typeof DynamicManager !== 'undefined',
+                        typeof DynamicManager !== 'undefined' ? '已加载' : '未加载');
+                    
+                    // ========== 8. 驱动层检查 ==========
+                    report.push('');
+                    report.push('--- 驱动层检查 ---');
+                    
+                    // MultithreadingDrive
+                    check('MultithreadingDrive', typeof MultithreadingDrive !== 'undefined',
+                        typeof MultithreadingDrive !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof MultithreadingDrive !== 'undefined') {
+                        check('MultithreadingDrive.createThread', typeof MultithreadingDrive.createThread === 'function');
+                        check('MultithreadingDrive.executeTask', typeof MultithreadingDrive.executeTask === 'function');
+                        check('MultithreadingDrive.getPoolStatus', typeof MultithreadingDrive.getPoolStatus === 'function');
+                    }
+                    
+                    // DragDrive
+                    check('DragDrive', typeof DragDrive !== 'undefined',
+                        typeof DragDrive !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof DragDrive !== 'undefined') {
+                        check('DragDrive.createDragSession', typeof DragDrive.createDragSession === 'function');
+                        check('DragDrive.enableDrag', typeof DragDrive.enableDrag === 'function');
+                        check('DragDrive.registerDropZone', typeof DragDrive.registerDropZone === 'function');
+                    }
+                    
+                    // GeographyDrive
+                    check('GeographyDrive', typeof GeographyDrive !== 'undefined',
+                        typeof GeographyDrive !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof GeographyDrive !== 'undefined') {
+                        check('GeographyDrive.getCurrentPosition', typeof GeographyDrive.getCurrentPosition === 'function');
+                        check('GeographyDrive.isSupported', typeof GeographyDrive.isSupported === 'function');
+                    }
+                    
+                    // CryptDrive
+                    check('CryptDrive', typeof CryptDrive !== 'undefined',
+                        typeof CryptDrive !== 'undefined' ? '已加载' : '未加载');
+                    if (typeof CryptDrive !== 'undefined') {
+                        check('CryptDrive.generateKeyPair', typeof CryptDrive.generateKeyPair === 'function');
+                        check('CryptDrive.importKeyPair', typeof CryptDrive.importKeyPair === 'function');
+                        check('CryptDrive.encrypt', typeof CryptDrive.encrypt === 'function');
+                        check('CryptDrive.decrypt', typeof CryptDrive.decrypt === 'function');
+                        check('CryptDrive.md5', typeof CryptDrive.md5 === 'function');
+                        check('CryptDrive.randomInt', typeof CryptDrive.randomInt === 'function');
+                        check('CryptDrive.randomFloat', typeof CryptDrive.randomFloat === 'function');
+                        check('CryptDrive.randomBoolean', typeof CryptDrive.randomBoolean === 'function');
+                        check('CryptDrive.randomString', typeof CryptDrive.randomString === 'function');
+                        check('CryptDrive.listKeys', typeof CryptDrive.listKeys === 'function');
+                        check('CryptDrive.deleteKey', typeof CryptDrive.deleteKey === 'function');
+                        check('CryptDrive.setDefaultKey', typeof CryptDrive.setDefaultKey === 'function');
+                        
+                        // 检查密钥列表
+                        try {
+                            const keys = CryptDrive.listKeys();
+                            if (keys && keys.length > 0) {
+                                info('已存储的密钥', `${keys.length} 个`);
+                                keys.forEach(key => {
+                                    const keyInfo = CryptDrive.getKeyInfo ? CryptDrive.getKeyInfo(key.id) : null;
+                                    if (keyInfo) {
+                                        const expired = keyInfo.expiresAt && new Date(keyInfo.expiresAt) < new Date();
+                                        const status = expired ? '已过期' : (keyInfo.isDefault ? '默认' : '正常');
+                                        info(`  密钥 ${key.id}`, `${status}${keyInfo.description ? ' - ' + keyInfo.description : ''}`);
+                                    }
+                                });
+                            } else {
+                                info('已存储的密钥', '无');
+                            }
+                        } catch (e) {
+                            warn('密钥列表', `获取失败: ${e.message}`);
+                        }
+                    }
+                    
+                    // ========== 9. 终端环境检查 ==========
+                    report.push('');
+                    report.push('--- 终端环境检查 ---');
+                    
+                    check('当前工作目录', typeof payload.env.cwd === 'string' && payload.env.cwd.length > 0,
+                        payload.env.cwd || '未设置');
+                    check('当前用户', typeof payload.env.user === 'string' && payload.env.user.length > 0,
+                        payload.env.user || '未设置');
+                    check('当前主机', typeof payload.env.host === 'string' && payload.env.host.length > 0,
+                        payload.env.host || '未设置');
+                    
+                    // 检查终端API
+                    try {
+                        if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+                            const terminalAPI = POOL.__GET__("APPLICATION_SHARED_POOL", "TerminalAPI");
+                            if (terminalAPI) {
+                                check('TerminalAPI', true, '已注册到共享空间');
+                                check('TerminalAPI.getActiveTerminal', typeof terminalAPI.getActiveTerminal === 'function');
+                                check('TerminalAPI.write', typeof terminalAPI.write === 'function');
+                                check('TerminalAPI.executeCommand', typeof terminalAPI.executeCommand === 'function');
+                            } else {
+                                check('TerminalAPI', false, '未注册到共享空间');
+                            }
+                        }
+                    } catch (e) {
+                        warn('TerminalAPI', `检查失败: ${e.message}`);
+                    }
+                    
+                    // 检查窗口管理功能
+                    try {
+                        // 尝试查找终端容器（支持多实例）
+                        let terminalContainer = null;
+                        let bashWindow = null;
+                        
+                        // 先尝试通过pid查找
+                        if (typeof TERMINAL !== 'undefined' && TERMINAL._instances && TERMINAL._instances.size > 0) {
+                            // 查找第一个实例的容器
+                            for (const [pid, instance] of TERMINAL._instances) {
+                                if (instance && instance.tabManager) {
+                                    const containerId = pid ? `terminal-${pid}` : 'terminal';
+                                    terminalContainer = document.getElementById(containerId);
+                        if (terminalContainer) {
+                                        bashWindow = terminalContainer.querySelector('.bash-window');
+                            if (bashWindow) {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        
+                        // 如果还没找到，尝试默认容器
+                        if (!terminalContainer) {
+                            terminalContainer = document.getElementById('terminal');
+                            if (terminalContainer) {
+                                bashWindow = terminalContainer.querySelector('.bash-window');
+                            }
+                        }
+                        
+                        // 如果还没找到，尝试通过class查找
+                        if (!bashWindow) {
+                            bashWindow = document.querySelector('.bash-window');
+                            if (bashWindow && bashWindow.parentElement) {
+                                terminalContainer = bashWindow.parentElement;
+                            }
+                        }
+                        
+                        if (bashWindow) {
+                            // 检查是否使用GUIManager
+                            const usesGUIManager = bashWindow.classList.contains('zos-gui-window');
+                            
+                            if (usesGUIManager) {
+                                // 使用GUIManager的情况
+                                const hasTitleBar = bashWindow.querySelector('.zos-window-titlebar') !== null;
+                                const hasMinBtn = bashWindow.querySelector('.zos-window-btn-minimize') !== null;
+                                const hasMaxBtn = bashWindow.querySelector('.zos-window-btn-maximize') !== null;
+                                const hasCloseBtn = bashWindow.querySelector('.zos-window-btn-close') !== null;
+                                const hasResizer = bashWindow.querySelector('.zos-window-resizer') !== null;
+                                check('窗口管理 - GUIManager', true);
+                                check('窗口管理 - 标题栏', hasTitleBar);
+                                check('窗口管理 - 最小化按钮', hasMinBtn);
+                                check('窗口管理 - 最大化按钮', hasMaxBtn);
+                                check('窗口管理 - 关闭按钮', hasCloseBtn);
+                                check('窗口管理 - 拉伸功能', hasResizer);
+                            } else {
+                                // 降级方案
+                                const hasCloseBtn = bashWindow.querySelector('.dot.close') !== null;
+                                const hasMaxBtn = bashWindow.querySelector('.dot.maximize') !== null;
+                                const hasResizer = bashWindow.querySelector('.window-resizer') !== null;
+                                check('窗口管理 - 关闭按钮', hasCloseBtn);
+                                check('窗口管理 - 全屏按钮', hasMaxBtn);
+                                check('窗口管理 - 拉伸功能', hasResizer);
+                                check('窗口管理 - 拖拽功能', bashWindow._windowState !== undefined);
+                            }
+                        } else {
+                            // 只在确实找不到时才警告
+                            if (!terminalContainer) {
+                                warn('窗口管理', 'terminal 容器未找到（可能所有实例都已关闭）');
+                            } else {
+                                warn('窗口管理', 'bash-window 元素未找到');
+                            }
+                        }
+                    } catch (e) {
+                        warn('窗口管理', `检查失败: ${e.message}`);
+                    }
+                    
+                    // ========== 9. 浏览器环境检查 ==========
+                    report.push('');
+                    report.push('--- 浏览器环境检查 ---');
+                    
+                    check('localStorage', typeof Storage !== 'undefined' && typeof localStorage !== 'undefined',
+                        typeof localStorage !== 'undefined' ? '可用' : '不可用');
+                    check('document.body', typeof document !== 'undefined' && document.body !== null,
+                        document.body ? '可用' : '不可用');
+                    check('window 对象', typeof window !== 'undefined',
+                        typeof window !== 'undefined' ? '可用' : '不可用');
+                    
+                    // ========== 10. 总结 ==========
+                    report.push('');
+                    report.push('=== 检查总结 ===');
+                    info('总检查项', `${totalChecks} 项`);
+                    info('通过', `${passedChecks} 项`);
+                    info('失败', `${failedChecks} 项`);
+                    info('警告', `${warnings} 项`);
+                    
+                    const successRate = totalChecks > 0 ? ((passedChecks / totalChecks) * 100).toFixed(2) : 0;
+                    info('通过率', `${successRate}%`);
+                    
+                    if (failedChecks === 0 && warnings === 0) {
+                        report.push('');
+                        report.push('[✓] 内核状态: 完全正常');
+                    } else if (failedChecks === 0) {
+                        report.push('');
+                        report.push('[!] 内核状态: 基本正常，但有警告');
+                    } else {
+                        report.push('');
+                        report.push('[✗] 内核状态: 存在问题，请检查上述失败项');
+                    }
+                    
+                    // 输出报告
+                    report.forEach(line => {
+                        payload.write(line);
+                    });
+                }
+                break;
+            case 'debug':
+                // debug 命令：调试工具，支持触发异常测试
+                (async () => {
+                    try {
+                        if (payload.args.length < 2) {
+                            payload.write('debug: 用法: debug <action> [args...]');
+                            payload.write('');
+                            payload.write('Actions:');
+                            payload.write('  exception <level> [message]  - 触发指定等级的异常（用于测试）');
+                            payload.write('    levels: kernel, system, program, service');
+                            payload.write('    message: 可选的异常消息（默认使用测试消息）');
+                            payload.write('');
+                            payload.write('Examples:');
+                            payload.write('  debug exception service "测试服务异常"');
+                            payload.write('  debug exception program');
+                            payload.write('  debug exception system "系统资源耗尽"');
+                            payload.write('  debug exception kernel "内核模块错误"');
+                            return;
+                        }
+                        
+                        const action = payload.args[1];
+                        
+                        if (action === 'exception') {
+                            // 触发异常测试
+                            if (payload.args.length < 3) {
+                                payload.write('debug exception: 用法: debug exception <level> [message]');
+                                payload.write('  levels: kernel, system, program, service');
+                                return;
+                            }
+                            
+                            const level = payload.args[2].toUpperCase();
+                            const message = payload.args.length > 3 
+                                ? payload.args.slice(3).join(' ') 
+                                : `测试${level}异常 - 由debug命令触发`;
+                            
+                            // 验证异常等级
+                            const validLevels = ['KERNEL', 'SYSTEM', 'PROGRAM', 'SERVICE'];
+                            if (!validLevels.includes(level)) {
+                                payload.write(`debug exception: 无效的异常等级 '${payload.args[2]}'`);
+                                payload.write(`  有效的等级: ${validLevels.join(', ').toLowerCase()}`);
+                                return;
+                            }
+                            
+                            // 获取当前进程PID（用于程序异常）
+                            let currentPid = null;
+                            if (terminalInstance && terminalInstance.pid) {
+                                currentPid = terminalInstance.pid;
+                            } else if (terminalInstance && terminalInstance.tabManager && terminalInstance.tabManager.pid) {
+                                currentPid = terminalInstance.tabManager.pid;
+                            }
+                            
+                            // 准备异常详情
+                            const details = {
+                                source: 'debug_command',
+                                timestamp: new Date().toISOString(),
+                                pid: currentPid,
+                                test: true
+                            };
+                            
+                            payload.write(`正在触发 ${level} 异常...`);
+                            payload.write(`消息: ${message}`);
+                            
+                            // 调用异常处理API（通过 ProcessManager）
+                            if (typeof ProcessManager !== 'undefined' && typeof ProcessManager.callKernelAPI === 'function') {
+                                try {
+                                    // 获取终端程序的 PID（用于调用内核API）
+                                    let terminalPid = currentPid;
+                                    if (!terminalPid && terminalInstance && terminalInstance.pid) {
+                                        terminalPid = terminalInstance.pid;
+                                    } else if (!terminalPid && terminalInstance && terminalInstance.tabManager && terminalInstance.tabManager.pid) {
+                                        terminalPid = terminalInstance.tabManager.pid;
+                                    }
+                                    
+                                    if (!terminalPid) {
+                                        payload.write('debug exception: 无法获取终端进程PID');
+                                        return;
+                                    }
+                                    
+                                    await ProcessManager.callKernelAPI(terminalPid, 'Exception.report', [
+                                        level,
+                                        message,
+                                        details,
+                                        level === 'PROGRAM' ? currentPid : null
+                                    ]);
+                                    
+                                    payload.write(`✓ ${level} 异常已报告`);
+                                    
+                                    // 根据异常等级给出提示
+                                    if (level === 'KERNEL') {
+                                        payload.write('⚠ 警告: 内核异常将导致系统进入BIOS安全模式');
+                                        payload.write('  系统重启后必须进入BIOS清除异常标志才能正常启动');
+                                    } else if (level === 'SYSTEM') {
+                                        payload.write('⚠ 警告: 系统异常将显示蓝屏并重启系统');
+                                        payload.write('  所有程序将被终止，系统将在15-60秒后自动重启');
+                                    } else if (level === 'PROGRAM') {
+                                        payload.write('⚠ 警告: 程序异常将导致当前程序被终止');
+                                    } else if (level === 'SERVICE') {
+                                        payload.write('✓ 服务异常已记录到日志（不影响系统运行）');
+                                    }
+                                } catch (error) {
+                                    payload.write(`debug exception: 错误: ${error.message}`);
+                                    if (typeof KernelLogger !== 'undefined') {
+                                        KernelLogger.error('Terminal', 'debug exception 失败', error);
+                                    }
+                                }
+                            } else {
+                                payload.write('debug exception: ProcessManager 不可用');
+                            }
+                        } else {
+                            payload.write(`debug: 未知的操作 '${action}'`);
+                            payload.write('  使用 "debug" 查看帮助信息');
+                        }
+                    } catch (error) {
+                        payload.write(`debug: 错误: ${error.message}`);
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.error('Terminal', 'debug 命令错误', error);
+                        }
+                    }
+                })();
+                break;
+            case 'help':
+                // 对于已支持的命令提供帮助信息,比如参数
+                payload.write('Supported commands (detailed):');
+                payload.write(' - ls [-l] [path]         : 列出目录项。可选 -l 输出长格式，支持相对或绝对盘符路径（例如 C:/dir）');
+                payload.write(' - tree [-L depth] [path] : 以树状结构显示目录。可选 -L 限制显示深度，支持相对或绝对路径');
+                payload.write(' - cd <dir>               : 切换目录，支持 .. 返回上级；参数可为相对或绝对路径');
+                payload.write(' - markdir <path>         : 创建目录，支持多级路径，例如 markdir foo/bar');
+                payload.write(' - markfile <path>        : 创建空文件（优先使用内核 FileFormwork，否则降级）');
+                payload.write(' - cat [-md] <file>       : 显示文件内容，支持相对/绝对路径，可选 -md 参数渲染Markdown');
+                payload.write(' - write [-a] <file> <txt>: 写入文件，默认覆盖；使用 -a 追加，支持路径');
+                payload.write(' - rm <file|dir>          : 删除文件或目录，支持路径');
+                payload.write(' - rename <old> <new>     : 重命名文件或目录');
+                payload.write(' - mv <src> <dest>        : 移动文件或目录到目标位置');
+                payload.write(' - copy <file|dir>        : 复制文件或目录到剪贴板');
+                payload.write(' - paste                  : 从剪贴板粘贴文件或目录到当前目录');
+                payload.write(' - ps [-l|--long] [pid]   : 显示程序内存信息。可选 -l 显示详细信息，可指定 pid 查看特定程序');
+                payload.write(' - kill [signal] <pid>    : 终止指定程序并释放其内存。可选信号参数（如 -9），可指定 pid');
+                payload.write(' - check                  : 全面自检内核并给出详细的检查报告');
+                payload.write(' - diskmanger [-l] [disk] : 显示磁盘分区信息。可选 -l 显示详细文件和目录占用，可选指定磁盘');
+                payload.write(' - echo [-n] [text...]    : 输出文本。可选 -n 参数不换行输出');
+                payload.write(' - clear                  : 清除屏幕');
+                payload.write(' - vim [file]             : Vim文本编辑器（支持Normal/Insert/Command模式，支持鼠标滚轮滚动）');
+                payload.write(' - pwd, whoami            : 显示当前路径或当前用户');
+                payload.write(' - login <username>       : 切换用户登录');
+                payload.write(' - su <username>          : 切换用户（与 login 相同）');
+                payload.write(' - users                  : 列出所有用户及其级别');
+                payload.write(' - groups                 : 列出所有用户组');
+                payload.write(' - groupadd <name> [type] [desc]: 创建用户组（需管理员权限），类型: USER_GROUP/ADMIN_GROUP');
+                payload.write(' - groupdel <name>        : 删除用户组（需默认管理员权限）');
+                payload.write(' - groupmod <name> <op>   : 修改用户组（需管理员权限），操作: -a/-d/-m (添加/删除成员/修改描述)');
+                payload.write(' - groupinfo <name>       : 显示用户组详细信息');
+                payload.write(' - env                    : 列出所有环境变量');
+                payload.write(' - setenv <name> <value>   : 设置环境变量');
+                payload.write(' - export <name>=<value>  : 设置环境变量（支持 name=value 或 name value 格式）');
+                payload.write(' - unsetenv <name>        : 删除环境变量');
+                payload.write(' - unset <name>           : 删除环境变量（与 unsetenv 相同）');
+                payload.write(' - getenv <name>          : 获取环境变量值');
+                payload.write(' - demo, toggleview       : 演示脚本 / 切换视图');
+                payload.write(' - power <action>         : 系统电源管理（reboot/shutdown/help）');
+                payload.write(' - debug <action> [args]   : 调试工具，支持触发异常测试（debug exception <level> [message]）');
+                payload.write('Notes: 路径格式以盘符开头如 C:/path，或相对于当前工作目录使用 ../ 和 ./ 。');
+                break;
+            case 'diskmanger':
+            case 'diskmgr':
+                // 显示磁盘分区信息，读取内核 Disk 静态数据
+                if(typeof Disk === 'undefined'){
+                    payload.write('diskmanger: Disk information not available');
+                    break;
+                }
+                
+                // 清除所有缓存，强制从 KernelMemory 重新加载最新数据
+                Disk._diskSeparateMapCache = null;
+                Disk._diskSeparateSizeCache = null;
+                Disk._diskFreeMapCache = null;
+                Disk._diskUsedMapCache = null;
+                
+                // 在更新之前，确保所有分区的 NodeTreeCollection 都已正确加载到 diskSeparateMap
+                // 这很重要，因为 Disk.update() 需要这些对象来计算已用空间
+                if (typeof POOL !== 'undefined' && typeof POOL.__GET__ === 'function') {
+                    try {
+                        // 获取所有已知的分区名称（从 diskSeparateSize）
+                        const knownPartitions = Array.from(Disk.diskSeparateSize.keys());
+                        for (const partitionName of knownPartitions) {
+                            // 检查 diskSeparateMap 中是否有该分区
+                            let coll = Disk.diskSeparateMap.get(partitionName);
+                            
+                            // 如果没有，尝试从 POOL 获取
+                            if (!coll) {
+                                try {
+                                    coll = POOL.__GET__("KERNEL_GLOBAL_POOL", partitionName);
+                                    if (coll) {
+                                        // 更新 diskSeparateMap
+                                        Disk.diskSeparateMap.set(partitionName, coll);
+                                    }
+                                } catch (e) {
+                                    // 忽略错误，继续处理其他分区
+                                }
+                            }
+                        }
+                        // 更新缓存
+                        if (Disk._diskSeparateMapCache) {
+                            Disk._diskSeparateMapCache = Disk.diskSeparateMap;
+                        }
+                    } catch (e) {
+                        // 忽略错误，继续使用现有的 diskSeparateMap
+                    }
+                }
+                
+                // 更新磁盘使用情况（这会重新计算已用和空闲空间）
+                // 现在 diskSeparateMap 应该包含所有分区的 NodeTreeCollection 对象
+                try {
+                    Disk.update();
+                } catch (e) {
+                    // 如果更新失败，继续使用现有数据
+                    payload.write(`警告: 无法更新磁盘使用情况: ${e.message}`);
+                }
+                
+                // 解析参数
+                const args = payload.args.slice(1);
+                let listMode = false;
+                let targetDisk = null;
+                
+                for (let i = 0; i < args.length; i++) {
+                    const arg = args[i];
+                    if (arg === '-l' || arg === '--list') {
+                        listMode = true;
+                    } else if (!arg.startsWith('-')) {
+                        targetDisk = arg.replace(/[:]/g, '').toUpperCase() + ':';
+                    }
+                }
+                
+                // 如果没有指定磁盘，显示所有磁盘的摘要信息
+                if (!listMode) {
+                    // 异步处理，从 PHP 服务获取真实的磁盘使用情况
+                    (async () => {
+                        try {
+                            // 从 PHP 服务获取真实的磁盘使用情况
+                            const getRealDiskInfo = async (diskName) => {
+                                const disk = diskName.replace(':', ''); // 移除冒号，得到 C 或 D
+                                try {
+                                    const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                    ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                    : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                        ? SystemInformation.getOrigin()
+                                        : window.location.origin);
+                                    url.searchParams.set('action', 'get_disk_info');
+                                    url.searchParams.set('disk', disk);
+                                    
+                                    const response = await fetch(url);
+                                    const result = await response.json();
+                                    
+                                    if (result.status === 'success' && result.data) {
+                                        const data = result.data;
+                                        // 使用 dirSize 作为已用空间（这是真实的目录大小）
+                                        const used = data.dirSize || 0;
+                                        // 使用配置的分区大小作为总大小
+                                        const total = Disk.diskSeparateSize.get(diskName) || data.totalSize || 0;
+                                        const free = total - used;
+                                        
+                                        return {
+                                            name: diskName,
+                                            total: total,
+                                            used: used,
+                                            free: free
+                                        };
+                                    }
+                                } catch (e) {
+                                    // 如果 PHP 服务不可用，回退到使用内存中的数据
+                                }
+                                
+                                // 回退方案：使用内存中的数据
+                                const total = Disk.diskSeparateSize.get(diskName) || 0;
+                                const used = Disk.diskUsedMap.get(diskName) || 0;
+                                const free = Disk.diskFreeMap.get(diskName) || (total - used);
+                                
+                                return {
+                                    name: diskName,
+                                    total: total,
+                                    used: used,
+                                    free: free
+                                };
+                            };
+                            
+                            // 获取所有分区信息
+                            // 首先从 diskSeparateSize 获取（这是最可靠的来源，因为它是从 D:/DiskData.json 读取的）
+                            let partitions = Array.from(Disk.diskSeparateSize.keys());
+                            
+                            // 如果 diskSeparateSize 为空，尝试从 PHP 服务获取分区列表（系统安装时创建的分区可能还未加载到内存）
+                            if (partitions.length === 0) {
+                                try {
+                                    const listUrl = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                        ? SystemInformation.buildServiceUrlObject('/system/service/DISKMANAGER.php')
+                                        : new URL('/system/service/DISKMANAGER.php', (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                            ? SystemInformation.getOrigin()
+                                            : window.location.origin);
+                                    listUrl.searchParams.set('action', 'list');
+                                    
+                                    const listResponse = await fetch(listUrl.toString());
+                                    if (listResponse.ok) {
+                                        const listResult = await listResponse.json();
+                                        if (listResult.status === 'success' && listResult.data && listResult.data.partitions) {
+                                            partitions = listResult.data.partitions.map(p => p.partition || p.name || p.letter + ':');
+                                            KernelLogger.debug('Terminal', `从 PHP 服务获取到 ${partitions.length} 个分区: ${partitions.join(', ')}`);
+                                        }
+                                    }
+                                } catch (e) {
+                                    KernelLogger.debug('Terminal', `从 PHP 服务获取分区列表失败: ${e.message}`);
+                                }
+                            }
+                            
+                            const diskInfos = await Promise.all(partitions.map(diskName => getRealDiskInfo(diskName)));
+                            
+                            payload.write(`Disk total capacity: ${Disk.diskSize} bytes`);
+                            diskInfos.forEach(info => {
+                                payload.write(`${info.name} : total=${info.total} used=${info.used} free=${info.free}`);
+                            });
+                            payload.write('');
+                            payload.write('Use "diskmanger -l [disk]" to see detailed file and directory usage');
+                        } catch (e) {
+                            payload.write(`错误: 无法获取磁盘信息: ${e.message}`);
+                        }
+                    })();
+                } else {
+                    // 列表模式：显示详细的文件和目录占用空间（从 PHP 服务获取真实数据）
+                    (async () => {
+                        try {
+                            // 获取所有分区
+                            let disksToShow = targetDisk ? [targetDisk] : Array.from(Disk.diskSeparateSize.keys());
+                            
+                            // 如果 diskSeparateSize 为空，尝试从 PHP 服务获取分区列表
+                            if (disksToShow.length === 0 && !targetDisk) {
+                                try {
+                                    const listUrl = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                        ? SystemInformation.buildServiceUrlObject('/system/service/DISKMANAGER.php')
+                                        : new URL('/system/service/DISKMANAGER.php', (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                            ? SystemInformation.getOrigin()
+                                            : window.location.origin);
+                                    listUrl.searchParams.set('action', 'list');
+                                    
+                                    const listResponse = await fetch(listUrl.toString());
+                                    if (listResponse.ok) {
+                                        const listResult = await listResponse.json();
+                                        if (listResult.status === 'success' && listResult.data && listResult.data.partitions) {
+                                            disksToShow = listResult.data.partitions.map(p => p.partition || p.name || p.letter + ':');
+                                        }
+                                    }
+                                } catch (e) {
+                                    KernelLogger.debug('Terminal', `从 PHP 服务获取分区列表失败: ${e.message}`);
+                                }
+                            }
+                            
+                            // 辅助函数：格式化文件大小
+                            const formatSize = (size) => {
+                                if (size >= 1024 * 1024 * 1024) {
+                                    return (size / (1024 * 1024 * 1024)).toFixed(2) + 'G';
+                                } else if (size >= 1024 * 1024) {
+                                    return (size / (1024 * 1024)).toFixed(2) + 'M';
+                                } else if (size >= 1024) {
+                                    return (size / 1024).toFixed(2) + 'K';
+                                }
+                                return size + 'B';
+                            };
+                            
+                            // 递归计算目录大小（从 PHP 服务获取）
+                            const calculateDirSize = async (dirPath) => {
+                                let phpPath = dirPath;
+                                if (/^[A-Z]:$/.test(phpPath)) {
+                                    phpPath = phpPath + '/';
+                                }
+                                
+                                try {
+                                    const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                    ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                    : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                        ? SystemInformation.getOrigin()
+                                        : window.location.origin);
+                                    url.searchParams.set('action', 'list_dir');
+                                    url.searchParams.set('path', phpPath);
+                                    
+                                    const response = await fetch(url);
+                                    if (!response.ok) {
+                                        return 0;
+                                    }
+                                    
+                                    const result = await response.json();
+                                    if (result.status !== 'success' || !result.data || !result.data.items) {
+                                        return 0;
+                                    }
+                                    
+                                    let size = 0;
+                                    const items = result.data.items;
+                                    
+                                    for (const item of items) {
+                                        if (item.type === 'file') {
+                                            size += item.size || 0;
+                                        } else if (item.type === 'directory') {
+                                            const subDirPath = item.path;
+                                            size += await calculateDirSize(subDirPath);
+                                        }
+                                    }
+                                    
+                                    return size;
+                                } catch (e) {
+                                    return 0;
+                                }
+                            };
+                            
+                            // 递归收集所有文件和目录（从 PHP 服务获取）
+                            const collectItems = async (path, items) => {
+                                let phpPath = path;
+                                if (/^[A-Z]:$/.test(phpPath)) {
+                                    phpPath = phpPath + '/';
+                                }
+                                
+                                try {
+                                    const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                    ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                    : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                        ? SystemInformation.getOrigin()
+                                        : window.location.origin);
+                                    url.searchParams.set('action', 'list_dir');
+                                    url.searchParams.set('path', phpPath);
+                                    
+                                    const response = await fetch(url);
+                                    if (!response.ok) {
+                                        return;
+                                    }
+                                    
+                                    const result = await response.json();
+                                    if (result.status !== 'success' || !result.data || !result.data.items) {
+                                        return;
+                                    }
+                                    
+                                    const dirItems = result.data.items;
+                                    
+                                    for (const item of dirItems) {
+                                        if (item.type === 'file') {
+                                            items.push({
+                                                path: item.path,
+                                                name: item.name,
+                                                type: 'file',
+                                                size: item.size || 0
+                                            });
+                                        } else if (item.type === 'directory') {
+                                            const subDirPath = item.path;
+                                            const subDirSize = await calculateDirSize(subDirPath);
+                                            items.push({
+                                                path: subDirPath,
+                                                name: item.name + '/',
+                                                type: 'dir',
+                                                size: subDirSize
+                                            });
+                                            // 递归处理子目录
+                                            await collectItems(subDirPath, items);
+                                        }
+                                    }
+                                } catch (e) {
+                                    // 忽略错误
+                                }
+                            };
+                            
+                            // 处理每个磁盘
+                            for (const diskName of disksToShow) {
+                                // 获取磁盘信息
+                                const disk = diskName.replace(':', '');
+                                let totalSize = Disk.diskSeparateSize.get(diskName) || 0;
+                                let usedSize = 0;
+                                
+                                try {
+                                    const url = (typeof SystemInformation !== 'undefined' && SystemInformation.buildServiceUrlObject) 
+                                    ? SystemInformation.buildServiceUrlObject(SystemInformation.SERVICE_NAMES.FSDIRVE)
+                                    : new URL(SystemInformation.getFSDirvePath(), (typeof SystemInformation !== 'undefined' && SystemInformation.getOrigin) 
+                                        ? SystemInformation.getOrigin()
+                                        : window.location.origin);
+                                    url.searchParams.set('action', 'get_disk_info');
+                                    url.searchParams.set('disk', disk);
+                                    
+                                    const response = await fetch(url);
+                                    if (response.ok) {
+                                        const result = await response.json();
+                                        if (result.status === 'success' && result.data) {
+                                            usedSize = result.data.dirSize || 0;
+                                            if (!totalSize) {
+                                                totalSize = result.data.totalSize || 0;
+                                            }
+                                        }
+                                    }
+                                } catch (e) {
+                                    // 如果 PHP 服务不可用，使用内存中的数据
+                                    usedSize = Disk.diskUsedMap.get(diskName) || 0;
+                                }
+                                
+                                const freeSize = totalSize - usedSize;
+                                
+                                payload.write('');
+                                payload.write({ html: `<span style="color: #4a9eff; font-weight: bold;">${diskName} - Disk Usage Details</span>` });
+                                payload.write(`Total: ${totalSize} bytes | Used: ${usedSize} bytes | Free: ${freeSize} bytes`);
+                                payload.write('');
+                                
+                                // 收集所有文件和目录
+                                const items = [];
+                                await collectItems(diskName, items);
+                                
+                                // 按大小排序（从大到小）
+                                items.sort((a, b) => b.size - a.size);
+                                
+                                // 显示标题
+                                payload.write({ html: `<span style="color: #888;">${'Size'.padEnd(12)} Type    Path</span>` });
+                                payload.write({ html: `<span style="color: #888;">${'-'.repeat(12)} ${'-'.repeat(6)} ${'-'.repeat(60)}</span>` });
+                                
+                                // 显示文件和目录列表
+                                items.forEach(item => {
+                                    const sizeStr = formatSize(item.size).padEnd(10);
+                                    const typeStr = (item.type === 'dir' ? 'DIR' : 'FILE').padEnd(6);
+                                    const pathStr = item.path.replace(diskName + '/', '') || item.name;
+                                    
+                                    const typeColor = item.type === 'dir' ? '#00ff00' : '#e6e6e6';
+                                    payload.write({
+                                        html: `<span style="color: #888;">${sizeStr.padStart(12)}</span> <span style="color: ${typeColor};">${typeStr}</span> <span style="color: #e6e6e6;">${pathStr}</span>`
+                                    });
+                                });
+                            }
+                        } catch (e) {
+                            payload.write(`错误: 无法获取磁盘详细信息: ${e.message}`);
+                        }
+                    })();
+                }
+                break;
+            case 'power':
+                // 电源管理命令：重启或关闭系统
+                {
+                    if (payload.args.length < 2) {
+                        payload.write('power: missing operand');
+                        payload.write('Usage: power <reboot|shutdown|help>');
+                        payload.write('  reboot   - Restart the system');
+                        payload.write('  shutdown - Shutdown the system');
+                        payload.write('  help     - Show this help message');
+                        return;
+                    }
+                    
+                    const action = payload.args[1].toLowerCase();
+                    
+                    switch (action) {
+                        case 'reboot':
+                        case 'restart':
+                            payload.write('System is rebooting...');
+                            payload.write('Saving all data...');
+                            // 保存所有数据到 localStorage（已经在自动保存，这里只是提示）
+                            setTimeout(() => {
+                                window.location.reload();
+                            }, 1000);
+                            break;
+                        case 'shutdown':
+                        case 'off':
+                        case 'shut':
+                            payload.write('System is shutting down...');
+                            payload.write('Saving all data...');
+                            // 尝试关闭窗口（仅在非用户交互的情况下才可能工作）
+                            setTimeout(() => {
+                                // 显示关闭消息
+                                document.body.innerHTML = '<div style="display: flex; justify-content: center; align-items: center; height: 100vh; font-family: monospace; color: #00ff00; font-size: 24px;">System Shutdown Complete<br/><span style="font-size: 16px; color: #888;">Please close this window manually</span></div>';
+                                // 尝试关闭窗口（大多数浏览器会阻止此操作）
+                                window.close();
+                            }, 1000);
+                            break;
+                        case 'help':
+                            payload.write('power - System power management');
+                            payload.write('');
+                            payload.write('Usage: power <action>');
+                            payload.write('');
+                            payload.write('Actions:');
+                            payload.write('  reboot, restart  - Restart the system (reload page)');
+                            payload.write('  shutdown, off    - Shutdown the system');
+                            payload.write('  help             - Show this help message');
+                            break;
+                        default:
+                            payload.write(`power: unknown action '${action}'`);
+                            payload.write('Available actions: reboot, shutdown, help');
+                            break;
+                    }
+                }
+                break;
+            case 'env':
+                // env 命令：列出所有环境变量
+                (async () => {
+                    try {
+                        let ProcessMgr = null;
+                        if (typeof ProcessManager !== 'undefined') {
+                            ProcessMgr = ProcessManager;
+                        } else if (typeof safePoolGet === 'function') {
+                            try {
+                                ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                            } catch (e) {
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                }
+                            }
+                        }
+
+                        if (!ProcessMgr || typeof ProcessMgr.callKernelAPI !== 'function') {
+                            payload.write('env: ProcessManager 不可用');
+                            return;
+                        }
+
+                        const envVars = await ProcessMgr.callKernelAPI(terminalInstance.pid, 'Environment.getAll', []);
+                        
+                        if (!envVars || typeof envVars !== 'object') {
+                            payload.write('env: 无法获取环境变量列表');
+                            return;
+                        }
+
+                        const keys = Object.keys(envVars);
+                        if (keys.length === 0) {
+                            payload.write('env: 没有环境变量');
+                            return;
+                        }
+
+                        payload.write('环境变量列表:');
+                        // 按名称排序
+                        keys.sort().forEach(key => {
+                            const value = envVars[key];
+                            payload.write(`  ${key}=${value}`);
+                        });
+                    } catch (error) {
+                        payload.write(`env: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'setenv':
+            case 'export':
+                // setenv/export 命令：设置环境变量
+                // 用法: setenv <name> <value> 或 export <name>=<value>
+                (async () => {
+                    try {
+                        let ProcessMgr = null;
+                        if (typeof ProcessManager !== 'undefined') {
+                            ProcessMgr = ProcessManager;
+                        } else if (typeof safePoolGet === 'function') {
+                            try {
+                                ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                            } catch (e) {
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                }
+                            }
+                        }
+
+                        if (!ProcessMgr || typeof ProcessMgr.callKernelAPI !== 'function') {
+                            payload.write(`${cmd}: ProcessManager 不可用`);
+                            return;
+                        }
+
+                        let name, value;
+                        
+                        if (cmd === 'export' && payload.args.length >= 2) {
+                            // export <name>=<value> 格式
+                            const arg = payload.args[1];
+                            const equalIndex = arg.indexOf('=');
+                            if (equalIndex === -1) {
+                                payload.write(`${cmd}: 用法: export <name>=<value>`);
+                                payload.write(`  或: ${cmd} <name> <value>`);
+                                return;
+                            }
+                            name = arg.substring(0, equalIndex).trim();
+                            value = arg.substring(equalIndex + 1).trim();
+                        } else if (payload.args.length >= 3) {
+                            // setenv <name> <value> 格式
+                            name = payload.args[1];
+                            value = payload.args.slice(2).join(' '); // 支持值中包含空格
+                        } else {
+                            payload.write(`${cmd}: 用法: ${cmd} <name> <value>`);
+                            if (cmd === 'export') {
+                                payload.write(`  或: ${cmd} <name>=<value>`);
+                            }
+                            return;
+                        }
+
+                        if (!name || name.length === 0) {
+                            payload.write(`${cmd}: 环境变量名不能为空`);
+                            return;
+                        }
+
+                        await ProcessMgr.callKernelAPI(terminalInstance.pid, 'Environment.set', [name, value]);
+                        payload.write(`已设置环境变量: ${name}=${value}`);
+                    } catch (error) {
+                        payload.write(`${cmd}: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'unsetenv':
+            case 'unset':
+                // unsetenv/unset 命令：删除环境变量
+                (async () => {
+                    try {
+                        if (payload.args.length < 2) {
+                            payload.write(`${cmd}: 用法: ${cmd} <name>`);
+                            return;
+                        }
+
+                        const name = payload.args[1];
+                        if (!name || name.length === 0) {
+                            payload.write(`${cmd}: 环境变量名不能为空`);
+                            return;
+                        }
+
+                        let ProcessMgr = null;
+                        if (typeof ProcessManager !== 'undefined') {
+                            ProcessMgr = ProcessManager;
+                        } else if (typeof safePoolGet === 'function') {
+                            try {
+                                ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                            } catch (e) {
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                }
+                            }
+                        }
+
+                        if (!ProcessMgr || typeof ProcessMgr.callKernelAPI !== 'function') {
+                            payload.write(`${cmd}: ProcessManager 不可用`);
+                            return;
+                        }
+
+                        await ProcessMgr.callKernelAPI(terminalInstance.pid, 'Environment.delete', [name]);
+                        payload.write(`已删除环境变量: ${name}`);
+                    } catch (error) {
+                        payload.write(`${cmd}: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            case 'getenv':
+                // getenv 命令：获取环境变量值
+                (async () => {
+                    try {
+                        if (payload.args.length < 2) {
+                            payload.write('getenv: 用法: getenv <name>');
+                            return;
+                        }
+
+                        const name = payload.args[1];
+                        if (!name || name.length === 0) {
+                            payload.write('getenv: 环境变量名不能为空');
+                            return;
+                        }
+
+                        let ProcessMgr = null;
+                        if (typeof ProcessManager !== 'undefined') {
+                            ProcessMgr = ProcessManager;
+                        } else if (typeof safePoolGet === 'function') {
+                            try {
+                                ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                            } catch (e) {
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                }
+                            }
+                        }
+
+                        if (!ProcessMgr || typeof ProcessMgr.callKernelAPI !== 'function') {
+                            payload.write('getenv: ProcessManager 不可用');
+                            return;
+                        }
+
+                        const value = await ProcessMgr.callKernelAPI(terminalInstance.pid, 'Environment.get', [name]);
+                        
+                        if (value === null || value === undefined) {
+                            payload.write(`getenv: 环境变量 ${name} 不存在`);
+                        } else {
+                            payload.write(`${name}=${value}`);
+                        }
+                    } catch (error) {
+                        payload.write(`getenv: 错误: ${error.message}`);
+                    }
+                })();
+                break;
+            default:
+                // 命令处理优先级：
+                // 1. 内置命令（已在 switch case 中处理）
+                // 2. D/bin/ 目录下的 .js 文件
+                // 3. 程序注册表中的程序（ApplicationAssetManager）
+                // 4. 环境变量中的值（作为程序名执行）
+                
+                // 使用异步函数统一处理所有步骤
+                (async () => {
+                    // 验证命令名是否有效
+                    if (!cmd || typeof cmd !== 'string' || cmd.trim() === '') {
+                        payload.write(`${cmd || ''} command not found`);
+                        return;
+                    }
+                    
+                    let isCLIProgram = false;
+                    let programInfo = null;
+                    let programName = cmd;  // 默认使用命令名作为程序名
+                    let foundInBin = false;  // 标记是否在 D/bin/ 中找到文件
+                    let foundInRegistry = false;  // 标记是否在程序注册表中找到
+                    let foundInEnv = false;  // 标记是否在环境变量中找到
+                    
+                    // 步骤0: 先检查程序注册表（如果程序已注册，跳过 D:/bin 检查，避免不必要的 404 请求）
+                    let AssetManager = null;
+                    if (typeof ApplicationAssetManager !== 'undefined') {
+                        AssetManager = ApplicationAssetManager;
+                    } else if (typeof safePoolGet === 'function') {
+                        try {
+                            AssetManager = safePoolGet('KERNEL_GLOBAL_POOL', 'ApplicationAssetManager');
+                        } catch (e) {
+                            // 忽略错误，继续后续查找
+                        }
+                    }
+                    
+                    if (AssetManager && typeof AssetManager.hasProgram === 'function') {
+                        const hasProgram = AssetManager.hasProgram(cmd);
+                        if (hasProgram) {
+                            foundInRegistry = true;
+                            isCLIProgram = true;
+                            programInfo = AssetManager.getProgramInfo(cmd);
+                            programName = cmd;
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.debug('Terminal', `从程序注册表找到程序: ${cmd}, 跳过 D:/bin 检查`);
+                            }
+                        }
+                    }
+                    
+                    // 步骤1: 如果程序注册表中没找到，尝试从 D/bin/ 目录查找同名 .js 文件
+                    if (!foundInRegistry) {
+                        try {
+                            // 获取 SystemInformation（用于构建 FSDirve URL）
+                            let SystemInfo = null;
+                            if (typeof SystemInformation !== 'undefined') {
+                                SystemInfo = SystemInformation;
+                            } else if (typeof safePoolGet === 'function') {
+                                try {
+                                    SystemInfo = safePoolGet('KERNEL_GLOBAL_POOL', 'SystemInformation');
+                                } catch (e) {
+                                    // 忽略错误
+                                }
+                            }
+                            
+                            if (SystemInfo && cmd && typeof cmd === 'string' && cmd.trim() !== '') {
+                                // 构建 FSDirve 服务 URL
+                                let url = null;
+                                if (SystemInfo.buildServiceUrlObject && SystemInfo.SERVICE_NAMES) {
+                                    url = SystemInfo.buildServiceUrlObject(SystemInfo.SERVICE_NAMES.FSDIRVE);
+                                } else if (SystemInfo.getFSDirvePath && SystemInfo.getOrigin) {
+                                    url = new URL(SystemInfo.getFSDirvePath(), SystemInfo.getOrigin());
+                                } else {
+                                    // 降级方案：使用默认路径
+                                    const origin = window.location.origin || 'http://localhost:8089';
+                                    url = new URL('/system/service/FSDirve.php', origin);
+                                }
+                                url.searchParams.set('action', 'read_file');
+                                url.searchParams.set('path', 'D:/bin');
+                                // 确保 cmd 是有效字符串，避免 undefined.js
+                                url.searchParams.set('fileName', `${cmd}.js`);
+                                
+                                // 尝试读取文件（静默处理 404 错误，因为文件不存在是正常情况）
+                                // 注意：浏览器可能会在控制台显示404错误，这是浏览器行为，无法完全避免
+                                // 但我们可以通过提前检查来减少不必要的请求
+                                let response;
+                                try {
+                                    // 使用fetch，但捕获所有错误（包括404）
+                                    response = await fetch(url.toString());
+                                    // 如果响应不是 200，静默继续（文件不存在是正常情况）
+                                    if (!response.ok) {
+                                        foundInBin = false;
+                                        // 不return，继续后续查找（环境变量等）
+                                    }
+                                } catch (error) {
+                                    // 网络错误，静默继续后续查找
+                                    foundInBin = false;
+                                    // 不return，继续后续查找（环境变量等）
+                                }
+                                
+                                // 如果响应不是ok，直接跳过后续处理，继续查找其他位置
+                                if (!response || !response.ok) {
+                                    foundInBin = false;
+                                    // 继续执行后续查找（不return）
+                                } else if (response.ok) {
+                                    const result = await response.json();
+                                    if (result.status === 'success') {
+                                        const fileContent = result.data?.content || result.data || '';
+                                        if (fileContent && typeof fileContent === 'string') {
+                                            // 文件存在，标记为已找到
+                                            foundInBin = true;
+                                            
+                                            // 获取 ProcessManager
+                                            let ProcessMgr = null;
+                                            if (typeof ProcessManager !== 'undefined') {
+                                                ProcessMgr = ProcessManager;
+                                            } else if (typeof safePoolGet === 'function') {
+                                                try {
+                                                    ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                                                } catch (e) {
+                                                    if (typeof KernelLogger !== 'undefined') {
+                                                        KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                                    }
+                                                }
+                                            }
+                                            
+                                            if (!ProcessMgr || typeof ProcessMgr.startProgram !== 'function') {
+                                                // ProcessManager 不可用，静默继续后续查找
+                                                foundInBin = false;
+                                            } else {
+                                                // 验证文件是否是有效的 ZerOS 程序
+                                                let isValidProgram = true;
+                                                if (ProcessMgr.validateProgramFile && typeof ProcessMgr.validateProgramFile === 'function') {
+                                                    const validation = ProcessMgr.validateProgramFile(fileContent, `${cmd}.js`);
+                                                    if (!validation.valid) {
+                                                        // 文件不是有效的 ZerOS 程序，静默继续后续查找
+                                                        isValidProgram = false;
+                                                        foundInBin = false;
+                                                    }
+                                                }
+                                                
+                                                if (isValidProgram) {
+                                                    // 使用 tempAsset 启动程序
+                                                    const tempAsset = {
+                                                        script: fileContent,
+                                                        styles: [],
+                                                        icon: null,  // 使用默认图标
+                                                        metadata: {
+                                                            name: cmd,
+                                                            type: 'CLI',  // 默认作为 CLI 程序
+                                                            allowMultipleInstances: true
+                                                        }
+                                                    };
+                                                    
+                                                    // 立即设置 busy 状态，隐藏命令输入
+                                                    terminalInstance._setBusy(true);
+                                                    
+                                                    // 尝试启动程序（异步）
+                                                    try {
+                                                        const pid = await ProcessMgr.startProgram(cmd, {
+                                                            terminal: terminalInstance,
+                                                            args: payload.args.slice(1),
+                                                            env: payload.env,
+                                                            cwd: payload.env.cwd,
+                                                            tempAsset: tempAsset
+                                                        });
+                                                        // 启动成功
+                                                        // 保存当前运行的 CLI 程序 PID，用于 Ctrl+C 中断
+                                                        terminalInstance._currentCliPid = pid;
+                                                        
+                                                        // 监听程序退出，自动恢复 busy 状态
+                                                        const checkProgramStatus = setInterval(() => {
+                                                            const processInfo = ProcessMgr.PROCESS_TABLE.get(pid);
+                                                            if (!processInfo || processInfo.status !== 'running') {
+                                                                clearInterval(checkProgramStatus);
+                                                                // 程序已退出，恢复 busy 状态
+                                                                if (terminalInstance.busy) {
+                                                                    terminalInstance._setBusy(false);
+                                                                }
+                                                                // 清除保存的 PID
+                                                                if (terminalInstance._currentCliPid === pid) {
+                                                                    terminalInstance._currentCliPid = null;
+                                                                }
+                                                            }
+                                                        }, 100);
+                                                        
+                                                        // 注意：不输出启动消息，让程序自己输出
+                                                        return;
+                                                    } catch (error) {
+                                                        // 启动失败，恢复 busy 状态
+                                                        terminalInstance._setBusy(false);
+                                                        terminalInstance._currentCliPid = null;
+                                                        
+                                                        // 启动失败，检查进程是否已经被创建
+                                                        // 如果进程已经被创建（即使初始化失败），不应该继续查找
+                                                        let processCreated = false;
+                                                        if (ProcessMgr && typeof ProcessMgr.getProcessInfo === 'function') {
+                                                            // 检查是否有同名进程（可能是刚创建的）
+                                                            const allProcesses = ProcessMgr.getProcessInfo();
+                                                            if (Array.isArray(allProcesses)) {
+                                                                const recentProcess = allProcesses.find(p => 
+                                                                    p.programName === cmd && 
+                                                                    (p.status === 'loading' || p.status === 'exited' || p.status === 'running')
+                                                                );
+                                                                if (recentProcess) {
+                                                                    processCreated = true;
+                                                                    // 进程已创建但初始化失败，输出错误信息
+                                                                    payload.write(`${cmd}: 程序启动失败: ${error.message || error}`);
+                                                                    return;
+                                                                }
+                                                            }
+                                                        }
+                                                        
+                                                        // 如果进程没有被创建，继续后续查找
+                                                        if (!processCreated) {
+                                                            if (typeof KernelLogger !== 'undefined') {
+                                                                KernelLogger.debug('Terminal', `D:/bin/${cmd}.js 启动失败，继续查找其他位置`, error);
+                                                            }
+                                                            foundInBin = false;
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (error) {
+                            // 读取文件失败，继续后续判断（不输出错误，因为可能是文件不存在）
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.debug('Terminal', `检查 D:/bin/${cmd}.js 失败`, error);
+                            }
+                        }
+                    
+                    // 步骤2: 如果程序注册表中没找到且 D/bin/ 中也没找到，步骤2 已在步骤0 中处理（程序注册表检查）
+                    
+                    // 步骤3: 如果程序注册表中找不到，尝试从环境变量查找
+                    if (!foundInBin && !isCLIProgram) {
+                        // 获取 ProcessManager（用于调用内核 API）
+                        let ProcessMgr = null;
+                        if (typeof ProcessManager !== 'undefined') {
+                            ProcessMgr = ProcessManager;
+                        } else if (typeof safePoolGet === 'function') {
+                            try {
+                                ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                            } catch (e) {
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                }
+                            }
+                        }
+                        
+                        if (ProcessMgr && typeof ProcessMgr.callKernelAPI === 'function') {
+                            // 通过 ProcessManager 调用环境变量 API（需要权限检查）
+                            try {
+                                // 获取终端程序的 PID（从 terminalInstance 或 tabManager）
+                                let terminalPid = terminalInstance.pid;
+                                if (!terminalPid && terminalInstance.tabManager && terminalInstance.tabManager.pid) {
+                                    terminalPid = terminalInstance.tabManager.pid;
+                                }
+                                
+                                if (!terminalPid) {
+                                    payload.write(`${cmd}: command not found (无法获取终端进程ID)`);
+                                    return;
+                                }
+                                
+                                const envValue = await ProcessMgr.callKernelAPI(terminalPid, 'Environment.get', [cmd]);
+                                if (envValue && typeof envValue === 'string' && envValue.trim()) {
+                                    foundInEnv = true;
+                                    const envValueTrimmed = envValue.trim();
+                                    
+                                    // 判断环境变量值是否是文件路径
+                                    // 路径特征：包含路径分隔符（/ 或 \），或以 .js 结尾
+                                    const isFilePath = /[\/\\]/.test(envValueTrimmed) || envValueTrimmed.endsWith('.js');
+                                    
+                                    let ProcessMgr = null;
+                                    if (typeof ProcessManager !== 'undefined') {
+                                        ProcessMgr = ProcessManager;
+                                    } else if (typeof safePoolGet === 'function') {
+                                    try {
+                                        ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                                    } catch (e) {
+                                        if (typeof KernelLogger !== 'undefined') {
+                                            KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                        }
+                                    }
+                                    }
+                                    
+                                    if (!ProcessMgr || typeof ProcessMgr.startProgram !== 'function') {
+                                        payload.write(`${cmd}: command not found (无法访问 ProcessManager)`);
+                                        return;
+                                    }
+                                    
+                                    if (isFilePath) {
+                                        // 环境变量值是文件路径，需要读取文件内容并作为程序执行
+                                        try {
+                                            // 规范化路径
+                                            let filePath = envValueTrimmed.replace(/\\/g, '/');
+                                            
+                                            // 读取文件内容
+                                            const pathParts = filePath.split('/');
+                                            const fileName = pathParts[pathParts.length - 1];
+                                            const parentPath = pathParts.slice(0, -1).join('/') || (filePath.split(':')[0] + ':');
+                                            
+                                            // 构建 FSDirve 服务 URL
+                                            let SystemInfo = null;
+                                            if (typeof SystemInformation !== 'undefined') {
+                                                SystemInfo = SystemInformation;
+                                            } else if (typeof safePoolGet === 'function') {
+                                                try {
+                                                    SystemInfo = safePoolGet('KERNEL_GLOBAL_POOL', 'SystemInformation');
+                                                } catch (e) {
+                                                    // 忽略错误
+                                                }
+                                            }
+                                            
+                                            if (!SystemInfo) {
+                                                payload.write(`${cmd}: command not found (无法访问 SystemInformation)`);
+                                                return;
+                                            }
+                                            
+                                            // 构建 FSDirve 服务 URL
+                                            let url = null;
+                                            if (SystemInfo.buildServiceUrlObject && SystemInfo.SERVICE_NAMES) {
+                                                url = SystemInfo.buildServiceUrlObject(SystemInfo.SERVICE_NAMES.FSDIRVE);
+                                            } else if (SystemInfo.getFSDirvePath && SystemInfo.getOrigin) {
+                                                url = new URL(SystemInfo.getFSDirvePath(), SystemInfo.getOrigin());
+                                            } else {
+                                                // 降级方案：使用默认路径
+                                                const origin = window.location.origin || 'http://localhost:8089';
+                                                url = new URL('/system/service/FSDirve.php', origin);
+                                            }
+                                            url.searchParams.set('action', 'read_file');
+                                            url.searchParams.set('path', parentPath);
+                                            url.searchParams.set('fileName', fileName);
+                                            
+                                            const response = await fetch(url.toString());
+                                            if (!response.ok) {
+                                                throw new Error(`HTTP ${response.status}`);
+                                            }
+                                            
+                                            const result = await response.json();
+                                            if (result.status !== 'success') {
+                                                throw new Error(result.message || '读取文件失败');
+                                            }
+                                            
+                                            const fileContent = result.data?.content || result.data || '';
+                                            if (!fileContent || typeof fileContent !== 'string') {
+                                                throw new Error('文件内容为空或格式错误');
+                                            }
+                                            
+                                            // 验证文件是否是有效的 ZerOS 程序
+                                            if (ProcessMgr.validateProgramFile && typeof ProcessMgr.validateProgramFile === 'function') {
+                                                const validation = ProcessMgr.validateProgramFile(fileContent, fileName);
+                                                if (!validation.valid) {
+                                                    payload.write(`${cmd}: command not found (环境变量 ${cmd}=${envValueTrimmed} 对应的文件不是有效的 ZerOS 程序)`);
+                                                    if (validation.errors && validation.errors.length > 0) {
+                                                        validation.errors.forEach(err => {
+                                                            payload.write(`  错误: ${err}`);
+                                                        });
+                                                    }
+                                                    return;
+                                                }
+                                            }
+                                            
+                                            // 使用 tempAsset 启动程序
+                                            const tempAsset = {
+                                                script: fileContent,
+                                                styles: [],
+                                                icon: null,  // 使用默认图标
+                                                metadata: {
+                                                    name: fileName.replace(/\.js$/, ''),
+                                                    type: 'CLI',  // 默认作为 CLI 程序
+                                                    allowMultipleInstances: true
+                                                }
+                                            };
+                                            
+                                            // 使用文件路径作为程序名（去掉扩展名）
+                                            const programNameFromPath = fileName.replace(/\.js$/, '');
+                                            
+                                            // 立即设置 busy 状态，隐藏命令输入
+                                            terminalInstance._setBusy(true);
+                                            
+                                            ProcessMgr.startProgram(programNameFromPath, {
+                                                terminal: terminalInstance,
+                                                args: payload.args.slice(1),
+                                                env: payload.env,
+                                                cwd: payload.env.cwd,
+                                                tempAsset: tempAsset
+                                            }).then((pid) => {
+                                                // 启动成功
+                                                // 保存当前运行的 CLI 程序 PID，用于 Ctrl+C 中断
+                                                terminalInstance._currentCliPid = pid;
+                                                
+                                                // 监听程序退出，自动恢复 busy 状态
+                                                const checkProgramStatus = setInterval(() => {
+                                                    const processInfo = ProcessMgr.PROCESS_TABLE.get(pid);
+                                                    if (!processInfo || processInfo.status !== 'running') {
+                                                        clearInterval(checkProgramStatus);
+                                                        // 程序已退出，恢复 busy 状态
+                                                        if (terminalInstance.busy) {
+                                                            terminalInstance._setBusy(false);
+                                                        }
+                                                        // 清除保存的 PID
+                                                        if (terminalInstance._currentCliPid === pid) {
+                                                            terminalInstance._currentCliPid = null;
+                                                        }
+                                                    }
+                                                }, 100);
+                                                
+                                                // 注意：不输出启动消息，让程序自己输出
+                                            }).catch((error) => {
+                                                // 启动失败，恢复 busy 状态
+                                                terminalInstance._setBusy(false);
+                                                terminalInstance._currentCliPid = null;
+                                                
+                                                if (typeof KernelLogger !== 'undefined') {
+                                                    KernelLogger.error('Terminal', `启动程序 ${programNameFromPath} 失败`, error);
+                                                }
+                                                    payload.write(`${cmd}: command not found (环境变量 ${cmd}=${envValueTrimmed} 对应的程序启动失败: ${error.message || error})`);
+                                            });
+                                        } catch (error) {
+                                            if (typeof KernelLogger !== 'undefined') {
+                                                KernelLogger.error('Terminal', `读取或执行文件 ${envValueTrimmed} 失败`, error);
+                                            }
+                                            payload.write(`${cmd}: command not found (环境变量 ${cmd}=${envValueTrimmed} 对应的文件读取失败: ${error.message || error})`);
+                                        }
+                                    } else {
+                                        // 环境变量值是程序名，尝试从程序注册表查找
+                                        const envProgramName = envValueTrimmed;
+                                        
+                                        // 再次检查程序注册表，看环境变量值对应的程序是否存在
+                                        let envIsCLIProgram = false;
+                                        let envProgramInfo = null;
+                                        if (AssetManager && typeof AssetManager.hasProgram === 'function') {
+                                            const hasProgram = AssetManager.hasProgram(envProgramName);
+                                            if (hasProgram) {
+                                                envIsCLIProgram = true;
+                                                envProgramInfo = AssetManager.getProgramInfo(envProgramName);
+                                            }
+                                        }
+                                        
+                                        // 立即设置 busy 状态，隐藏命令输入
+                                        terminalInstance._setBusy(true);
+                                        
+                                        // 尝试启动环境变量值对应的程序
+                                        ProcessMgr.startProgram(envProgramName, {
+                                            terminal: terminalInstance,
+                                            args: payload.args.slice(1),
+                                            env: payload.env,
+                                            cwd: payload.env.cwd
+                                        }).then((pid) => {
+                                            // 启动成功
+                                            // 保存当前运行的 CLI 程序 PID，用于 Ctrl+C 中断
+                                            terminalInstance._currentCliPid = pid;
+                                            
+                                            // 监听程序退出，自动恢复 busy 状态
+                                            const checkProgramStatus = setInterval(() => {
+                                                const processInfo = ProcessMgr.PROCESS_TABLE.get(pid);
+                                                if (!processInfo || processInfo.status !== 'running') {
+                                                    clearInterval(checkProgramStatus);
+                                                    // 程序已退出，恢复 busy 状态
+                                                    if (terminalInstance.busy) {
+                                                        terminalInstance._setBusy(false);
+                                                    }
+                                                    // 清除保存的 PID
+                                                    if (terminalInstance._currentCliPid === pid) {
+                                                        terminalInstance._currentCliPid = null;
+                                                    }
+                                                }
+                                            }, 100);
+                                            
+                                            // 注意：不输出启动消息，让程序自己输出
+                                        }).catch((error) => {
+                                            // 启动失败，恢复 busy 状态
+                                            terminalInstance._setBusy(false);
+                                            terminalInstance._currentCliPid = null;
+                                            
+                                            if (typeof KernelLogger !== 'undefined') {
+                                                KernelLogger.error('Terminal', `启动程序 ${envProgramName} 失败`, error);
+                                            }
+                                            payload.write(`${cmd}: command not found (环境变量 ${cmd}=${envProgramName} 对应的程序不存在)`);
+                                        });
+                                    }
+                                } else {
+                                    // 环境变量不存在或为空，输出命令未找到
+                                    payload.write(`${cmd}: command not found`);
+                                    return;
+                                }
+                            } catch (error) {
+                                // 获取环境变量失败，输出命令未找到
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.error('Terminal', `获取环境变量 ${cmd} 失败`, error);
+                                }
+                                payload.write(`${cmd}: command not found`);
+                                return;
+                            }
+                            // 环境变量处理完成，直接返回，不继续后续步骤
+                            return;
+                        } else {
+                            // 环境变量查找失败或不可用，继续后续步骤
+                        }
+                    }
+                    
+                    // 步骤4: 如果从程序注册表找到了程序，启动它
+                    if (isCLIProgram && programInfo) {
+                        // 这是一个CLI程序，通过ProcessManager启动
+                        let ProcessMgr = null;
+                        if (typeof ProcessManager !== 'undefined') {
+                            ProcessMgr = ProcessManager;
+                        } else if (typeof safePoolGet === 'function') {
+                            try {
+                                ProcessMgr = safePoolGet('KERNEL_GLOBAL_POOL', 'ProcessManager');
+                            } catch (e) {
+                                if (typeof KernelLogger !== 'undefined') {
+                                    KernelLogger.error('Terminal', '获取ProcessManager失败', e);
+                                }
+                            }
+                        }
+                        
+                        if (!ProcessMgr) {
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.warn('Terminal', `ProcessManager 不可用，无法启动程序: ${cmd}`);
+                            }
+                            payload.write(`${cmd}: command not found (ProcessManager 不可用)`);
+                            return;
+                        }
+                        
+                        if (typeof ProcessMgr.startProgram !== 'function') {
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.warn('Terminal', `ProcessManager.startProgram 不可用，无法启动程序: ${cmd}`);
+                            }
+                            payload.write(`${cmd}: command not found (ProcessManager.startProgram 不可用)`);
+                            return;
+                        }
+                        
+                        if (typeof KernelLogger !== 'undefined') {
+                            KernelLogger.debug('Terminal', `准备启动程序: ${programName}, script: ${programInfo.script || 'N/A'}, cwd: ${payload.env.cwd}`);
+                        }
+                        
+                        // 立即设置 busy 状态，隐藏命令输入
+                        terminalInstance._setBusy(true);
+                        
+                        // 异步启动程序
+                        ProcessMgr.startProgram(programName, {
+                            terminal: terminalInstance,
+                            args: payload.args.slice(1),  // 传递剩余参数
+                            env: payload.env,
+                            cwd: payload.env.cwd
+                        }).then((pid) => {
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.debug('Terminal', `程序 ${programName} 启动成功, PID: ${pid}`);
+                            }
+                            // 程序启动成功
+                            // 注意：不输出启动消息，让程序自己输出
+                            // payload.write(`[CLI] 程序 ${programName} 已启动 (PID: ${pid})`);
+                            
+                            // 保存当前运行的 CLI 程序 PID，用于 Ctrl+C 中断
+                            terminalInstance._currentCliPid = pid;
+                            
+                            // 监听程序退出，自动恢复 busy 状态
+                            const checkProgramStatus = setInterval(() => {
+                                const processInfo = ProcessMgr.PROCESS_TABLE.get(pid);
+                                if (!processInfo || processInfo.status !== 'running') {
+                                    clearInterval(checkProgramStatus);
+                                    // 程序已退出，恢复 busy 状态
+                                    if (terminalInstance.busy) {
+                                        terminalInstance._setBusy(false);
+                                    }
+                                    // 清除保存的 PID
+                                    if (terminalInstance._currentCliPid === pid) {
+                                        terminalInstance._currentCliPid = null;
+                                    }
+                                }
+                            }, 100);
+                        }).catch((error) => {
+                            // 启动失败，恢复 busy 状态
+                            terminalInstance._setBusy(false);
+                            terminalInstance._currentCliPid = null;
+                            // 程序启动失败
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.error('Terminal', `启动程序 ${programName} 失败`, error);
+                                if (error.stack) {
+                                    KernelLogger.error('Terminal', '错误堆栈', error.stack);
+                                }
+                            }
+                            // 输出更详细的错误信息
+                            const errorMsg = error && error.message ? error.message : String(error);
+                            payload.write(`${cmd}: 程序启动失败: ${errorMsg}`);
+                        });
+                    } else {
+                        // 如果既不是 D/bin/ 中的文件，也不是程序注册表中的程序，也没有环境变量，输出命令未找到
+                        // 只有在所有查找都失败时才提示命令不存在
+                        if (!foundInBin && !foundInRegistry && !foundInEnv) {
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.debug('Terminal', `命令未找到: ${cmd} (foundInBin: ${foundInBin}, foundInRegistry: ${foundInRegistry}, foundInEnv: ${foundInEnv})`);
+                            }
+                            payload.write(`${cmd}: command not found`);
+                        } else {
+                            // 如果找到了但在启动过程中失败，这里不应该输出 "command not found"
+                            // 因为错误应该已经在启动过程中输出了
+                            if (typeof KernelLogger !== 'undefined') {
+                                KernelLogger.debug('Terminal', `命令处理完成但未启动: ${cmd} (foundInBin: ${foundInBin}, foundInRegistry: ${foundInRegistry}, foundInEnv: ${foundInEnv}, isCLIProgram: ${isCLIProgram}, programInfo: ${programInfo ? 'exists' : 'null'})`);
+                            }
+                        }
+                    }
+                }
+                })();
+                // 异步处理所有步骤，直接返回
+                return;
+            }
+        }
+        
+        // 保存处理器引用以便后续可以移除
+        terminalInstance._commandHandler = commandHandler;
+        
+        // 注册命令处理器
+        terminalInstance.on('command', commandHandler);
+    }
+    
+    // 延迟初始化：tabManager 将在 TERMINAL.__init__ 中初始化
+    // tabManager = new TabManager();  // 已移动到 TERMINAL.__init__ 中
+    
+    // 获取活动终端实例的辅助函数
+    function getActiveTerminal() {
+        return tabManager ? tabManager.getActiveTerminal() : null;
+    }
+    
+    // 命令处理器已经在 createTab 时注册，这里不需要重复注册
+    
+    // 不直接暴露到全局，而是通过 TERMINAL 对象导出
+    // 进程管理器会调用 TERMINAL.__init__() 来初始化
+    const TERMINAL = {
+        // 程序信息方法
+        __info__() {
+            return {
+                name: '终端程序',
+                type: 'GUI',  // GUI程序（有窗口界面）
+                version: '1.0.0',
+                description: 'ZerOS Bash风格终端',
+                author: 'ZerOS Team',
+                copyright: '© 2025 ZerOS',
+                capabilities: [
+                    'command_execution',
+                    'tab_management',
+                    'terminal_emulation',
+                    'cli_program_launching',
+                    'window_management'  // 窗口管理功能
+                ],
+                permissions: typeof PermissionManager !== 'undefined' ? [
+                    PermissionManager.PERMISSION.GUI_WINDOW_CREATE,
+                    PermissionManager.PERMISSION.KERNEL_DISK_READ,
+                    PermissionManager.PERMISSION.KERNEL_DISK_WRITE,
+                    PermissionManager.PERMISSION.KERNEL_DISK_LIST,
+                    PermissionManager.PERMISSION.PROCESS_MANAGE,
+                    PermissionManager.PERMISSION.EVENT_LISTENER,
+                    PermissionManager.PERMISSION.ENVIRONMENT_READ  // 读取环境变量（用于命令别名查找）
+                ] : [],
+                metadata: {
+                    autoStart: true,  // 终端作为系统内置程序，自动启动
+                    priority: 0,
+                    allowMultipleInstances: true  // 支持多开
+                }
+            };
+        },
+        
+        // 初始化方法（由 ProcessManager 调用）
+        __init__(pid, initArgs = {}) {
+            // 保存 pid 到实例，以便在回调中使用
+            const currentPid = pid;
+            
+            // 将 initArgs 临时存储到 window，以便 TabManager 可以访问
+            if (typeof window !== 'undefined') {
+                window._currentInitArgs = initArgs;
+            }
+            
+            // 如果是CLI程序专用终端，设置窗口标题
+            if (initArgs.forCLI && initArgs.cliProgramName) {
+                // 延迟设置，等待窗口创建完成
+                setTimeout(() => {
+                    const bashWindow = document.querySelector(`.bash-window[data-pid="${currentPid}"]`);
+                    if (bashWindow) {
+                        const titleEl = bashWindow.querySelector('.bar-title, .title');
+                        if (titleEl) {
+                            titleEl.textContent = initArgs.cliProgramName;
+                        }
+                    }
+                }, 200);
+            }
+            
+            // 初始化标签页管理器（传入PID以标记DOM元素）
+            // 为每个实例创建独立的 tabManager
+            const instanceTabManager = new TabManager(currentPid);
+            
+            // 清理临时存储
+            if (typeof window !== 'undefined' && window._currentInitArgs) {
+                delete window._currentInitArgs;
+            }
+            
+            // 存储实例的 tabManager（使用 pid 作为键）
+            if (!TERMINAL._instances) {
+                TERMINAL._instances = new Map();
+            }
+            TERMINAL._instances.set(currentPid, {
+                tabManager: instanceTabManager,
+                pid: currentPid
+            });
+            
+            // 如果这是第一个实例，或者没有活动的实例，设置为默认实例
+            if (!tabManager || TERMINAL._instances.size === 1) {
+                tabManager = instanceTabManager;
+            }
+            
+            // 新创建的实例应该自动获得焦点（提升z-index）
+            // 延迟一下，确保DOM已经创建完成
+            setTimeout(() => {
+                const bashWindow = document.querySelector(`.bash-window[data-pid="${currentPid}"]`);
+                if (bashWindow) {
+                    // 移除所有窗口的焦点状态
+                    const allWindows = document.querySelectorAll('.bash-window');
+                    allWindows.forEach(win => {
+                        win.classList.remove('focused');
+                    });
+                    // 为当前窗口添加焦点状态
+                    bashWindow.classList.add('focused');
+                    
+                    // 获取活动终端实例并聚焦
+                    const activeTerminal = instanceTabManager.getActiveTerminal();
+                    if (activeTerminal) {
+                        setTimeout(() => {
+                            if (activeTerminal.isActive && !activeTerminal.busy) {
+                                activeTerminal.focus();
+                            }
+                        }, 100);
+                    }
+                }
+            }, 200);
+            
+            // 暴露到全局，便于外部动态修改环境（使用当前活动的实例）
+            window.TabManager = tabManager;
+            window.BashTerminal = getActiveTerminal;
+            // 兼容命名：返回当前活动终端
+            window.Terminal = getActiveTerminal;
+            
+            // 获取活动终端实例，用于暴露API
+            const activeTerminal = getActiveTerminal();
+            
+            // 创建终端API对象，暴露到共享空间
+            const terminalAPI = {
+                // 获取活动终端实例
+                getActiveTerminal: () => getActiveTerminal(),
+                
+                // 写入输出
+                write: (textOrOptions) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.write === 'function') {
+                        term.write(textOrOptions);
+                    }
+                },
+                
+                // 清空输出
+                clear: () => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.clear === 'function') {
+                        term.clear();
+                    }
+                },
+                
+                // 注入CSS样式（为自定义UI提供支持）
+                injectCSS: (cssText, id = null) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.injectCSS === 'function') {
+                        return term.injectCSS(cssText, id);
+                    }
+                    return false;
+                },
+                
+                // 移除CSS样式
+                removeCSS: (id) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.removeCSS === 'function') {
+                        return term.removeCSS(id);
+                    }
+                    return false;
+                },
+                
+                // 创建自定义HTML容器（用于复杂的自定义UI）
+                createContainer: (html, options = {}) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.createContainer === 'function') {
+                        return term.createContainer(html, options);
+                    }
+                    return null;
+                },
+                
+                // 设置当前工作目录
+                setCwd: (path) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.setCwd === 'function') {
+                        term.setCwd(path);
+                    }
+                },
+                
+                // 设置用户
+                setUser: (user) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.setUser === 'function') {
+                        term.setUser(user);
+                    }
+                },
+                
+                // 设置主机
+                setHost: (host) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.setHost === 'function') {
+                        term.setHost(host);
+                    }
+                },
+                
+                // 获取环境变量
+                getEnv: () => {
+                    const term = getActiveTerminal();
+                    if (term && term.env) {
+                        return { ...term.env };  // 返回副本
+                    }
+                    return null;
+                },
+                
+                // 设置环境变量
+                setEnv: (env) => {
+                    const term = getActiveTerminal();
+                    if (term && term.env) {
+                        Object.assign(term.env, env);
+                        if (typeof term._updatePrompt === 'function') {
+                            term._updatePrompt();
+                        }
+                    }
+                },
+                
+                // 获取焦点
+                focus: () => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.focus === 'function') {
+                        term.focus();
+                    }
+                },
+                
+                // 创建新标签页
+                createTab: (title = null) => {
+                    if (tabManager && typeof tabManager.createTab === 'function') {
+                        return tabManager.createTab(title);
+                    }
+                    return null;
+                },
+                
+                // 切换标签页
+                switchTab: (tabId) => {
+                    if (tabManager && typeof tabManager.switchTab === 'function') {
+                        tabManager.switchTab(tabId);
+                    }
+                },
+                
+                // 关闭标签页
+                closeTab: (tabId) => {
+                    if (tabManager && typeof tabManager.closeTab === 'function') {
+                        tabManager.closeTab(tabId);
+                    }
+                },
+                
+                // 获取所有标签页
+                getTabs: () => {
+                    if (tabManager && tabManager.tabs) {
+                        return tabManager.tabs.map(tab => ({
+                            id: tab.id,
+                            title: tab.title,
+                            isActive: tab.id === tabManager.activeTabId
+                        }));
+                    }
+                    return [];
+                },
+                
+                // 注册命令处理器
+                onCommand: (handler) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.on === 'function') {
+                        return term.on('command', handler);
+                    }
+                    return null;
+                },
+                
+                // 取消命令处理器
+                offCommand: (handler) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term.off === 'function') {
+                        term.off('command', handler);
+                    }
+                },
+                
+                // 执行命令（模拟用户输入）
+                executeCommand: (command) => {
+                    const term = getActiveTerminal();
+                    if (term && typeof term._handleInput === 'function') {
+                        term._handleInput(command);
+                    } else if (term && term.cmdEl) {
+                        // 降级方案：直接设置命令并触发回车
+                        term.cmdEl.textContent = command;
+                        const enterEvent = new KeyboardEvent('keydown', {
+                            key: 'Enter',
+                            code: 'Enter',
+                            keyCode: 13,
+                            which: 13,
+                            bubbles: true
+                        });
+                        term.cmdEl.dispatchEvent(enterEvent);
+                    }
+                }
+            };
+            
+            // 将终端API暴露到共享空间
+            if (typeof POOL !== 'undefined' && typeof POOL.__ADD__ === 'function') {
+                try {
+                    if (!POOL.__HAS__("APPLICATION_SHARED_POOL")) {
+                        POOL.__INIT__("APPLICATION_SHARED_POOL");
+                    }
+                    POOL.__ADD__("APPLICATION_SHARED_POOL", "TerminalAPI", terminalAPI);
+                } catch (e) {
+                    if (typeof KernelLogger !== 'undefined') {
+                        KernelLogger.error('Terminal', 'Failed to expose TerminalAPI to shared space', e);
+                    }
+                }
+            }
+            
+            // 说明：外部可以使用以下接口动态修改环境：
+            // window.Terminal.setCwd('/path');
+            // window.Terminal.setUser('alice');
+            // window.Terminal.setHost('myhost');
+            // 或直接修改 window.Terminal.env 并调用 window.Terminal._updatePrompt();
+            // 
+            // 或者通过共享空间访问：
+            // const TerminalAPI = POOL.__GET__("APPLICATION_SHARED_POOL", "TerminalAPI");
+            // TerminalAPI.write("Hello World");
+            // TerminalAPI.setCwd("/path/to/dir");
+            
+            return {
+                pid: currentPid,
+                tabManager: tabManager,
+                getActiveTerminal: getActiveTerminal,
+                api: terminalAPI  // 返回API对象引用
+            };
+        },
+        
+        // 退出方法（由 ProcessManager 调用）
+        __exit__(pid, force = false) {
+            // 清理所有事件处理器（通过 EventManager）
+            if (typeof EventManager !== 'undefined' && pid) {
+                EventManager.unregisterAllHandlersForPid(pid);
+            }
+            
+            // 清理窗口焦点事件处理器（如果是最后一个终端实例）
+            if (tabManager && tabManager.tabs.length === 0 && window._terminalWindowFocusHandler) {
+                if (typeof EventManager !== 'undefined' && typeof window._terminalWindowFocusHandler === 'number') {
+                    const exploitPid = typeof ProcessManager !== 'undefined' ? ProcessManager.EXPLOIT_PID : 10000;
+                    EventManager.unregisterEventHandler(window._terminalWindowFocusHandler);
+                }
+                window._terminalWindowFocusHandler = null;
+            }
+            // 获取当前实例的 tabManager
+            let instanceTabManager = null;
+            if (TERMINAL._instances && TERMINAL._instances.has(pid)) {
+                const instance = TERMINAL._instances.get(pid);
+                instanceTabManager = instance.tabManager;
+            }
+            
+            // 清理事件监听器（拖拽和调整大小）
+            if (instanceTabManager && instanceTabManager.tabs) {
+                instanceTabManager.tabs.forEach(tab => {
+                    if (tab.terminalInstance) {
+                        const term = tab.terminalInstance;
+                        // 清理拖拽事件监听器
+                        if (term._dragMousemoveHandler) {
+                            document.removeEventListener('mousemove', term._dragMousemoveHandler);
+                            term._dragMousemoveHandler = null;
+                        }
+                        if (term._dragMouseupHandler) {
+                            document.removeEventListener('mouseup', term._dragMouseupHandler);
+                            term._dragMouseupHandler = null;
+                        }
+                        // 清理调整大小事件监听器
+                        if (term._resizeMousemoveHandler) {
+                            document.removeEventListener('mousemove', term._resizeMousemoveHandler);
+                            term._resizeMousemoveHandler = null;
+                        }
+                        if (term._resizeMouseupHandler) {
+                            document.removeEventListener('mouseup', term._resizeMouseupHandler);
+                            term._resizeMouseupHandler = null;
+                        }
+                    }
+                });
+            }
+            
+            // 清理资源
+            if (instanceTabManager) {
+                // 关闭所有标签页
+                const tabs = [...instanceTabManager.tabs];
+                tabs.forEach(tab => {
+                    try {
+                        instanceTabManager.closeTab(tab.tabId);
+                    } catch (e) {
+                        // 忽略错误
+                    }
+                });
+            }
+            
+            // 从实例映射中移除
+            if (TERMINAL._instances) {
+                TERMINAL._instances.delete(pid);
+                
+                // 如果这是当前活动的实例，切换到另一个实例（如果有）
+                if (tabManager === instanceTabManager && TERMINAL._instances.size > 0) {
+                    const firstInstance = TERMINAL._instances.values().next().value;
+                    if (firstInstance) {
+                        tabManager = firstInstance.tabManager;
+                        window.TabManager = tabManager;
+                    }
+                }
+            }
+            
+            // 如果所有实例都已退出，清理全局引用
+            if (!TERMINAL._instances || TERMINAL._instances.size === 0) {
+                if (typeof window !== 'undefined') {
+                    delete window.TabManager;
+                    delete window.BashTerminal;
+                    delete window.Terminal;
+                }
+                TERMINAL._instances = null;
+            }
+            
+            // 先注销窗口（如果使用 GUIManager），确保标题栏保护机制被正确清理
+            if (typeof GUIManager !== 'undefined' && typeof GUIManager.getWindowsByPid === 'function') {
+                const windows = GUIManager.getWindowsByPid(pid);
+                for (const windowInfo of windows) {
+                    if (windowInfo.windowId && typeof GUIManager.unregisterWindow === 'function') {
+                        try {
+                            GUIManager.unregisterWindow(windowInfo.windowId);
+                        } catch (e) {
+                            // 忽略错误，继续清理
+                        }
+                    }
+                }
+            }
+            
+            // 清理该实例的 DOM 元素（通过 pid 标记）
+            // 注意：在注销窗口后，窗口元素可能已经被 GUIManager 移除，所以这里只清理其他元素
+            if (typeof document !== 'undefined') {
+                const elementsToRemove = document.querySelectorAll(`[data-pid="${pid}"]`);
+                elementsToRemove.forEach(el => {
+                    try {
+                        // 检查元素是否还在 DOM 中，以及是否是窗口元素（窗口元素应该已经被 GUIManager 移除）
+                        if (el.parentElement && !el.classList.contains('zos-gui-window')) {
+                            el.remove();
+                        }
+                    } catch (e) {
+                        // 忽略错误
+                    }
+                });
+                
+                // 清理终端容器（如果为空）
+                const terminalContainer = document.getElementById(`terminal-${pid}`);
+                if (terminalContainer && terminalContainer.children.length === 0) {
+                    try {
+                        terminalContainer.remove();
+                    } catch (e) {
+                        // 忽略错误
+                    }
+                }
+            }
+        }
+    };
+    
+    // 导出 TERMINAL 对象到全局（进程管理器需要访问）
+    if (typeof window !== 'undefined') {
+        window.TERMINAL = TERMINAL;
+    } else if (typeof globalThis !== 'undefined') {
+        globalThis.TERMINAL = TERMINAL;
+    }
+    
+    // 发布信号（如果 DependencyConfig 可用）
+    // 使用虚拟路径格式，与 applicationAssets.js 中的路径保持一致
+    if (typeof DependencyConfig !== 'undefined') {
+        DependencyConfig.publishSignal("D:/application/terminal/terminal.js");
+    }
+
+})(window);
+

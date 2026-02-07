@@ -1,0 +1,293 @@
+/* ZerOS 系统服务管理程序样式 - 固定高度防止 UI 错乱 */
+
+.servicemanager-window {
+    background: transparent;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+}
+
+/* 工具栏：严格限制高度，禁止被撑大 */
+.servicemanager-toolbar {
+    flex-shrink: 0;
+    min-height: 40px;
+    max-height: 40px;
+    height: 40px;
+    box-sizing: border-box;
+    background: var(--theme-background-elevated, var(--theme-background-secondary, #252b35));
+    color: var(--theme-text, #d7e0dd);
+}
+
+.servicemanager-main {
+    flex: 1;
+    min-height: 0;
+    overflow: hidden;
+}
+
+/* 按钮：与计划任务一致的中性样式，无强色块背景 */
+.servicemanager-btn {
+    padding: 8px 16px;
+    border: 1px solid var(--theme-border, rgba(139, 92, 246, 0.3));
+    background: var(--theme-background-elevated, rgba(139, 92, 246, 0.08));
+    color: var(--theme-text, #e8ecf0);
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    transition: all 0.2s ease;
+}
+
+.servicemanager-btn:hover:not(:disabled) {
+    background: var(--theme-primary, rgba(139, 92, 246, 0.2));
+    border-color: var(--theme-primary, rgba(139, 92, 246, 0.5));
+}
+
+.servicemanager-btn:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+.servicemanager-btn-refresh {
+    background: var(--theme-background-tertiary, rgba(255, 255, 255, 0.08));
+    color: var(--theme-text, #d7e0dd);
+    border: 1px solid var(--theme-border, rgba(255, 255, 255, 0.12));
+}
+
+.servicemanager-btn-refresh:hover:not(:disabled) {
+    background: var(--theme-background-elevated, rgba(255, 255, 255, 0.12));
+    border-color: var(--theme-border, rgba(255, 255, 255, 0.2));
+}
+
+/* 启动/停止与其它按钮同款中性样式，不再使用蓝/红背景 */
+.servicemanager-btn-start,
+.servicemanager-btn-stop {
+    background: var(--theme-background-elevated, rgba(139, 92, 246, 0.08));
+    color: var(--theme-text, #e8ecf0);
+    border: 1px solid var(--theme-border, rgba(139, 92, 246, 0.3));
+}
+
+.servicemanager-btn-start:hover:not(:disabled),
+.servicemanager-btn-stop:hover:not(:disabled) {
+    background: var(--theme-primary, rgba(139, 92, 246, 0.2));
+    border-color: var(--theme-primary, rgba(139, 92, 246, 0.5));
+}
+
+/* 自启开关：复选框与标签同行 */
+.servicemanager-autostart-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 4px;
+}
+
+.servicemanager-autostart-row input[type="checkbox"] {
+    width: 18px;
+    height: 18px;
+    cursor: pointer;
+    accent-color: var(--theme-primary, #8b5cf6);
+}
+
+.servicemanager-autostart-row label {
+    cursor: pointer;
+    font-size: 14px;
+    color: var(--theme-text, #d7e0dd);
+}
+
+/* 列表区域：参与 flex 分配，不撑大 */
+.servicemanager-list-wrap {
+    flex-shrink: 0;
+    min-height: 0;
+    display: flex;
+    flex-direction: column;
+    background: var(--theme-background-secondary, var(--theme-background-tertiary, #1a1f28));
+}
+
+.servicemanager-list-label,
+.servicemanager-detail-label {
+    flex-shrink: 0;
+    height: 32px;
+    line-height: 32px;
+    color: var(--theme-text, #d7e0dd);
+    background: var(--theme-background-elevated, rgba(0,0,0,0.2));
+}
+
+.servicemanager-list {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    background: var(--theme-background-secondary, #1a1f28);
+    color: var(--theme-text, #d7e0dd);
+}
+
+.servicemanager-list-item {
+    cursor: pointer;
+    transition: background 0.1s ease;
+}
+
+.servicemanager-list-item:hover {
+    background: var(--theme-background-tertiary, rgba(139, 92, 246, 0.08));
+}
+
+.servicemanager-list-item.servicemanager-item-selected {
+    background: var(--theme-primary-light, rgba(139, 92, 246, 0.15));
+    color: var(--theme-primary, #8b5cf6);
+}
+
+.servicemanager-empty {
+    padding: 16px;
+    text-align: center;
+    color: var(--theme-text-muted, #94a3b8);
+    font-size: 14px;
+}
+
+/* 详情区域：参与 flex 分配 */
+.servicemanager-detail-wrap {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    background: var(--theme-background, #050810);
+}
+
+.servicemanager-detail-content {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    background: var(--theme-background, #050810);
+    color: var(--theme-text, #d7e0dd);
+    font-size: 13px;
+    display: flex;
+    justify-content: center;
+    padding: 24px 16px;
+    box-sizing: border-box;
+}
+
+/* 详情内容居中容器，结构化卡片布局 */
+.servicemanager-detail-inner {
+    width: 100%;
+    max-width: 480px;
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 20px;
+}
+
+.servicemanager-detail-header {
+    text-align: center;
+    padding: 16px 0 8px;
+    border-bottom: 1px solid var(--theme-border, rgba(139, 92, 246, 0.2));
+}
+
+.servicemanager-detail-header .servicemanager-detail-title {
+    font-size: 20px;
+    font-weight: 600;
+    color: var(--theme-text, #e8ecf0);
+    margin: 0 0 8px 0;
+    letter-spacing: 0.02em;
+}
+
+.servicemanager-detail-header .servicemanager-detail-badge {
+    display: inline-block;
+    font-size: 12px;
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-weight: 500;
+}
+
+.servicemanager-detail-badge.servicemanager-badge-running {
+    background: rgba(34, 197, 94, 0.2);
+    color: #22c55e;
+    border: 1px solid rgba(34, 197, 94, 0.3);
+}
+
+.servicemanager-detail-badge.servicemanager-badge-stopped {
+    background: rgba(148, 163, 184, 0.15);
+    color: var(--theme-text-muted, #94a3b8);
+    border: 1px solid rgba(148, 163, 184, 0.25);
+}
+
+.servicemanager-detail-card {
+    background: var(--theme-background-elevated, rgba(20, 25, 35, 0.6));
+    border: 1px solid var(--theme-border, rgba(139, 92, 246, 0.18));
+    border-radius: 12px;
+    padding: 16px 20px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+}
+
+.servicemanager-detail-card-title {
+    font-size: 12px;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--theme-text-muted, #94a3b8);
+    margin: 0 0 12px 0;
+    padding-bottom: 8px;
+    border-bottom: 1px solid var(--theme-border, rgba(139, 92, 246, 0.12));
+}
+
+.servicemanager-detail-card-body {
+    font-size: 14px;
+    line-height: 1.5;
+}
+
+.servicemanager-detail-grid {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 8px 20px;
+    align-items: baseline;
+}
+
+.servicemanager-detail-grid .servicemanager-detail-label {
+    color: var(--theme-text-muted, #94a3b8);
+    font-size: 13px;
+}
+
+.servicemanager-detail-grid .servicemanager-detail-value {
+    word-break: break-word;
+    color: var(--theme-text, #e8ecf0);
+}
+
+.servicemanager-detail-actions {
+    display: flex;
+    gap: 10px;
+    flex-wrap: wrap;
+}
+
+.servicemanager-detail-hint {
+    font-size: 12px;
+    color: var(--theme-text-muted, #94a3b8);
+    margin-top: 8px;
+}
+
+.servicemanager-detail-placeholder,
+.servicemanager-detail-loading,
+.servicemanager-detail-error {
+    color: var(--theme-text-muted, #94a3b8);
+    padding: 24px 16px;
+    text-align: center;
+}
+
+.servicemanager-detail-section {
+    margin-bottom: 12px;
+}
+
+.servicemanager-detail-section strong {
+    display: block;
+    margin-bottom: 4px;
+    color: var(--theme-text-secondary, #b8c5c0);
+}
+
+.servicemanager-detail-pre {
+    margin: 0;
+    padding: 8px;
+    background: var(--theme-background-secondary, #1a1f28);
+    border-radius: 4px;
+    font-size: 12px;
+    overflow-x: auto;
+    white-space: pre-wrap;
+    word-break: break-all;
+    max-height: 120px;
+    overflow-y: auto;
+}

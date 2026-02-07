@@ -1,0 +1,1560 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ZerOS 系统安装</title>
+    <link rel="stylesheet" href="install.css">
+</head>
+<body>
+    <!-- 加载动画屏幕 -->
+    <div class="loading-screen" id="loadingScreen">
+        <img src="zeros-logo.svg" alt="ZerOS Logo" class="loading-logo">
+        <div class="loading-spinner"></div>
+        <div class="loading-text" id="loadingText">正在加载安装程序...</div>
+    </div>
+    
+    <div class="install-container">
+        <div class="install-header">
+            <img src="zeros-logo.svg" alt="ZerOS Logo" class="install-logo">
+            <h1 class="install-title" id="installTitle">ZerOS 系统安装程序</h1>
+            <p class="install-subtitle" id="installSubtitle">欢迎安装 ZerOS 操作系统</p>
+        </div>
+        
+        <div class="install-content" id="installContent">
+            <!-- 内容将由JavaScript动态加载 -->
+        </div>
+    </div>
+    
+    <script>
+        // 安装状态管理
+        const InstallState = {
+            STEP_LANGUAGE: 'language',
+            STEP_AGREEMENT: 'agreement',
+            STEP_ENV_SELECT: 'env_select',
+            STEP_EXTRACT: 'extract',
+            STEP_DISK_INIT: 'disk_init',
+            STEP_USER_SETUP: 'user_setup',
+            STEP_COMPLETE: 'complete'
+        };
+        
+        // 工具函数：格式化字节大小
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 B';
+            const k = 1024;
+            const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+        
+        // 工具函数：解析字节大小（支持GB/MB等）
+        function parseBytes(sizeStr) {
+            const match = sizeStr.match(/^(\d+(?:\.\d+)?)\s*(B|KB|MB|GB|TB)$/i);
+            if (!match) return null;
+            const value = parseFloat(match[1]);
+            const unit = match[2].toUpperCase();
+            const multipliers = { B: 1, KB: 1024, MB: 1024*1024, GB: 1024*1024*1024, TB: 1024*1024*1024*1024 };
+            return Math.floor(value * multipliers[unit]);
+        }
+        
+        // 工具函数：获取当前步骤
+        function getCurrentStep() {
+            return localStorage.getItem('install_step') || InstallState.STEP_LANGUAGE;
+        }
+        
+        // 工具函数：设置当前步骤
+        function setCurrentStep(step) {
+            localStorage.setItem('install_step', step);
+        }
+        
+        // 工具函数：获取安装配置
+        function getInstallConfig() {
+            const config = localStorage.getItem('install_config');
+            return config ? JSON.parse(config) : null;
+        }
+        
+        // 工具函数：保存安装配置
+        function saveInstallConfig(config) {
+            localStorage.setItem('install_config', JSON.stringify(config));
+        }
+        
+        // 工具函数：清除安装数据
+        function clearInstallData() {
+            localStorage.removeItem('install_step');
+            localStorage.removeItem('install_config');
+        }
+        
+        // 获取当前安装界面语言（用户选择或默认简体中文）
+        function getCurrentLang() {
+            const config = getInstallConfig();
+            return (config && config.language) ? config.language : 'zh-CN';
+        }
+        
+        // 按当前语言取文案
+        function t(key) {
+            const lang = getCurrentLang();
+            const L = InstallI18n[lang] || InstallI18n['zh-CN'];
+            return (L && L[key] != null) ? L[key] : (InstallI18n['zh-CN'] && InstallI18n['zh-CN'][key]) || key;
+        }
+        
+        // 中英分语言文案（按用户选择动态展示）
+        const InstallI18n = {
+            'zh-CN': {
+                btn_next: '下一步',
+                btn_back: '上一步',
+                btn_ok: '确定',
+                btn_cancel: '取消',
+                btn_reload: '重新加载',
+                tip: '提示',
+                confirm_title: '确认',
+                error_input: '输入错误',
+                error_title: '错误',
+                warning_title: '警告',
+                step_lang_title: '选择语言',
+                step_lang_desc: '请选择安装界面及系统使用的语言。',
+                step_agreement_title: '安装协议',
+                step_agreement_desc: '请仔细阅读以下协议，同意后方可继续安装。',
+                step_agreement_agree: '同意并继续',
+                step_agreement_back: '上一步',
+                step_env_title: '环境配置',
+                step_env_desc: '请选择您的运行环境并配置端口。',
+                step_env_php: 'PHP 环境',
+                step_env_springboot: 'SpringBoot 环境',
+                step_env_port: '服务端口：',
+                step_extract_title: '解压系统文件',
+                step_extract_desc: '正在解压系统文件，请稍候...',
+                step_extract_prepare: '准备解压...',
+                step_extract_progress: '进度:',
+                step_disk_title: '磁盘初始化',
+                step_disk_desc: '配置磁盘分区。系统盘 D: 已固定为 2GB，您可以为其他分区分配剩余空间。',
+                step_disk_total: '总磁盘大小：',
+                step_disk_system: '系统盘 D:：',
+                step_disk_fixed: '（固定，不可修改）',
+                step_disk_available: '可用空间：',
+                step_disk_add: '添加新分区',
+                step_disk_name: '分区名称',
+                step_disk_size: '分区大小（例如：1GB, 500MB）',
+                step_disk_placeholder: '例如: 1GB',
+                step_disk_confirm: '确认并继续',
+                step_disk_system_label: '（系统盘，固定）',
+                step_disk_delete: '删除',
+                step_user_title: '用户设置',
+                step_user_desc: '创建系统管理员账户。',
+                step_user_username: '用户名 *',
+                step_user_username_placeholder: '只能使用英文字母、数字和下划线，必须以字母开头',
+                step_user_username_hint: '例如：admin, root, user123',
+                step_user_password: '密码 *',
+                step_user_password_placeholder: '请输入密码',
+                step_user_password_hint: '密码不能为空',
+                step_user_confirm_pwd: '确认密码 *',
+                step_user_confirm_placeholder: '请再次输入密码',
+                step_complete_title: '安装完成！',
+                step_complete_desc: 'ZerOS 系统已成功安装到您的服务器上。',
+                step_complete_next: '下一步操作',
+                step_complete_1: '1. 重启服务器以确保所有服务正确启动。',
+                step_complete_2: '2. 重启后，访问以下地址使用系统：',
+                step_complete_3: '3. 使用您刚刚创建的管理员账户登录系统。',
+                step_finish_btn: '完成安装并清理文件',
+                countdown_suffix: ' 秒后自动进入下一步...',
+                status_language_selected: '语言已选择，即将进入协议步骤...',
+                status_agreement_accepted: '协议已确认，即将进入环境配置步骤...',
+                status_env_ok: '环境验证通过，即将开始解压系统文件...',
+                status_disk_ok: '磁盘初始化完成，即将进入用户设置步骤...',
+                status_user_created: '用户创建成功，即将进入完成页面...',
+                status_extract_doing: '正在解压',
+                status_extract_ok: '解压成功',
+                status_extract_fail: '解压失败',
+                status_all_extracted: '所有文件解压完成',
+                status_verifying: '检查系统资源完整性...',
+                status_integrity_ok: '系统资源完整性检查通过',
+                status_extract_done: '系统文件解压完成！请按照以下步骤操作。',
+                status_restart_1: '重启服务器以确保所有文件正确加载。',
+                status_restart_2: '重启完成后，重新访问此安装页面（当前地址）。',
+                status_restart_3: '系统将自动继续到磁盘初始化步骤。',
+                btn_after_restart: '重启服务器后，点击此处继续安装',
+                notice_after_restart: '注意：重启后请务必重新访问此安装页面才能继续安装流程。',
+                btn_adding: '添加中...',
+                btn_initializing_disk: '正在初始化磁盘...',
+                btn_creating_user: '正在创建用户...',
+                btn_cleaning: '正在清理安装文件...',
+                btn_done_redirect: '清理完成，正在跳转...',
+                btn_cleanup_failed_redirect: '清理失败，正在跳转...',
+                error_port_invalid: '请输入有效的端口号（1-65535）',
+                error_connect_failed: '连接失败',
+                error_extract_failed: '解压失败',
+                error_disk_init_failed: '初始化失败',
+                error_user_create_failed: '创建失败',
+                error_partition_info: '请填写完整的分区信息。',
+                error_partition_size: '请输入有效的分区大小（例如：1GB, 500MB）。',
+                error_partition_total: '分区总大小不能超过',
+                error_partition_size_invalid: '请输入有效的分区大小。',
+                error_username_invalid: '用户名只能包含英文字母、数字和下划线，且必须以字母开头。',
+                error_password_required: '密码不能为空。',
+                error_password_mismatch: '两次输入的密码不一致。',
+                confirm_remove_partition: '确定要删除分区',
+                confirm_remove_suffix: '吗？',
+                page_title: 'ZerOS 系统安装',
+                page_subtitle: '欢迎安装 ZerOS 操作系统',
+                loading_text: '正在加载安装程序...'
+            },
+            'en': {
+                btn_next: 'Next',
+                btn_back: 'Back',
+                btn_ok: 'OK',
+                btn_cancel: 'Cancel',
+                btn_reload: 'Reload',
+                tip: 'Notice',
+                confirm_title: 'Confirm',
+                error_input: 'Invalid Input',
+                error_title: 'Error',
+                warning_title: 'Warning',
+                step_lang_title: 'Choose Language',
+                step_lang_desc: 'Please select the language for installation and system.',
+                step_agreement_title: 'License Agreement',
+                step_agreement_desc: 'Please read the agreement below and accept to continue.',
+                step_agreement_agree: 'Accept and Continue',
+                step_agreement_back: 'Back',
+                step_env_title: 'Environment',
+                step_env_desc: 'Select your runtime and port.',
+                step_env_php: 'PHP',
+                step_env_springboot: 'SpringBoot',
+                step_env_port: 'Service port:',
+                step_extract_title: 'Extract System Files',
+                step_extract_desc: 'Extracting, please wait...',
+                step_extract_prepare: 'Preparing...',
+                step_extract_progress: 'Progress:',
+                step_disk_title: 'Disk Setup',
+                step_disk_desc: 'Configure partitions. Drive D: is fixed at 2GB; you may allocate the rest.',
+                step_disk_total: 'Total size:',
+                step_disk_system: 'System drive D:',
+                step_disk_fixed: '(fixed)',
+                step_disk_available: 'Available:',
+                step_disk_add: 'Add partition',
+                step_disk_name: 'Partition',
+                step_disk_size: 'Size (e.g. 1GB, 500MB)',
+                step_disk_placeholder: 'e.g. 1GB',
+                step_disk_confirm: 'Confirm and Continue',
+                step_disk_system_label: '(system, fixed)',
+                step_disk_delete: 'Remove',
+                step_user_title: 'User Setup',
+                step_user_desc: 'Create the administrator account.',
+                step_user_username: 'Username *',
+                step_user_username_placeholder: 'Letters, numbers, underscore; must start with a letter',
+                step_user_username_hint: 'e.g. admin, root, user123',
+                step_user_password: 'Password *',
+                step_user_password_placeholder: 'Enter password',
+                step_user_password_hint: 'Password is required',
+                step_user_confirm_pwd: 'Confirm password *',
+                step_user_confirm_placeholder: 'Enter password again',
+                step_complete_title: 'Installation Complete!',
+                step_complete_desc: 'ZerOS has been installed successfully.',
+                step_complete_next: 'Next steps',
+                step_complete_1: '1. Restart the server to start all services.',
+                step_complete_2: '2. Then open the system at:',
+                step_complete_3: '3. Log in with the administrator account you created.',
+                step_finish_btn: 'Finish and clean up',
+                countdown_suffix: ' sec, auto-continue...',
+                status_language_selected: 'Language selected, entering agreement step...',
+                status_agreement_accepted: 'Agreement accepted, entering environment step...',
+                status_env_ok: 'Environment OK, extracting system files...',
+                status_disk_ok: 'Disk OK, entering user setup...',
+                status_user_created: 'User created, entering completion...',
+                status_extract_doing: 'Extracting',
+                status_extract_ok: 'OK',
+                status_extract_fail: 'Extract failed',
+                status_all_extracted: 'All files extracted',
+                status_verifying: 'Verifying integrity...',
+                status_integrity_ok: 'Integrity OK',
+                status_extract_done: 'Extraction complete. Follow the steps below.',
+                status_restart_1: 'Restart the server to load all files.',
+                status_restart_2: 'Then revisit this page (current URL).',
+                status_restart_3: 'Setup continues to disk initialization.',
+                btn_after_restart: 'After restart, click here to continue',
+                notice_after_restart: 'You must revisit this page after restart to continue.',
+                btn_adding: 'Adding...',
+                btn_initializing_disk: 'Initializing disk...',
+                btn_creating_user: 'Creating user...',
+                btn_cleaning: 'Cleaning up...',
+                btn_done_redirect: 'Done, redirecting...',
+                btn_cleanup_failed_redirect: 'Cleanup failed, redirecting...',
+                error_port_invalid: 'Please enter a valid port (1-65535)',
+                error_connect_failed: 'Connection failed',
+                error_extract_failed: 'Extract failed',
+                error_disk_init_failed: 'Init failed',
+                error_user_create_failed: 'Failed',
+                error_partition_info: 'Please fill in partition name and size.',
+                error_partition_size: 'Enter valid size (e.g. 1GB, 500MB).',
+                error_partition_total: 'Total size cannot exceed',
+                error_partition_size_invalid: 'Enter valid partition size.',
+                error_username_invalid: 'Username: letters, numbers, underscore; must start with a letter.',
+                error_password_required: 'Password is required.',
+                error_password_mismatch: 'Passwords do not match.',
+                confirm_remove_partition: 'Remove partition',
+                confirm_remove_suffix: '?',
+                page_title: 'ZerOS Setup',
+                page_subtitle: 'Welcome to ZerOS',
+                loading_text: 'Loading installer...'
+            }
+        };
+        
+        // API调用函数
+        async function apiCall(url, data = null) {
+            const options = {
+                method: data ? 'POST' : 'GET',
+                headers: {
+                    'Content-Type': 'application/json'
+                }
+            };
+            if (data) {
+                options.body = JSON.stringify(data);
+            }
+            const response = await fetch(url, options);
+            return await response.json();
+        }
+        
+        // Windows 风格弹窗组件
+        function showModal(options) {
+            return new Promise((resolve) => {
+                const {
+                    title = t('tip'),
+                    message = '',
+                    type = 'info', // info, warning, error, success
+                    buttons = [{ text: t('btn_ok'), primary: true }]
+                } = options;
+                
+                // 创建遮罩层
+                const overlay = document.createElement('div');
+                overlay.className = 'modal-overlay';
+                
+                // 创建弹窗
+                const dialog = document.createElement('div');
+                dialog.className = 'modal-dialog';
+                
+                // 图标映射
+                const iconMap = {
+                    info: { icon: 'ℹ', class: 'info' },
+                    warning: { icon: '⚠', class: 'warning' },
+                    error: { icon: '✕', class: 'error' },
+                    success: { icon: '✓', class: 'success' }
+                };
+                
+                const iconInfo = iconMap[type] || iconMap.info;
+                
+                // 创建标题栏
+                const header = document.createElement('div');
+                header.className = 'modal-header';
+                header.innerHTML = `
+                    <div class="modal-icon ${iconInfo.class}">${iconInfo.icon}</div>
+                    <div class="modal-title">${title}</div>
+                `;
+                
+                // 创建内容区
+                const body = document.createElement('div');
+                body.className = 'modal-body';
+                // 支持多行文本（保留换行）
+                const messageHtml = message.replace(/\n/g, '<br>');
+                body.innerHTML = `<pre>${messageHtml}</pre>`;
+                
+                // 创建按钮区
+                const footer = document.createElement('div');
+                footer.className = 'modal-footer';
+                
+                buttons.forEach((btn, index) => {
+                    const button = document.createElement('button');
+                    button.className = `btn ${btn.primary ? 'btn-primary' : 'btn-secondary'}`;
+                    button.textContent = btn.text;
+                    button.onclick = () => {
+                        document.body.removeChild(overlay);
+                        resolve(btn.value !== undefined ? btn.value : index);
+                    };
+                    footer.appendChild(button);
+                });
+                
+                // 组装弹窗
+                dialog.appendChild(header);
+                dialog.appendChild(body);
+                dialog.appendChild(footer);
+                overlay.appendChild(dialog);
+                
+                // 点击遮罩层关闭（如果只有一个按钮）
+                if (buttons.length === 1 && buttons[0].primary) {
+                    overlay.onclick = (e) => {
+                        if (e.target === overlay) {
+                            document.body.removeChild(overlay);
+                            resolve(0);
+                        }
+                    };
+                }
+                
+                // 添加到页面
+                document.body.appendChild(overlay);
+                
+                // 聚焦第一个按钮
+                setTimeout(() => {
+                    const firstBtn = footer.querySelector('.btn-primary') || footer.querySelector('.btn');
+                    if (firstBtn) {
+                        firstBtn.focus();
+                    }
+                }, 100);
+            });
+        }
+        
+        // 简化的 alert 替代函数
+        async function showAlert(message, title = t('tip'), type = 'info') {
+            await showModal({
+                title,
+                message,
+                type,
+                buttons: [{ text: t('btn_ok'), primary: true }]
+            });
+        }
+        
+        // 简化的 confirm 替代函数
+        async function showConfirm(message, title = t('confirm_title')) {
+            return await showModal({
+                title,
+                message,
+                type: 'warning',
+                buttons: [
+                    { text: t('btn_cancel'), primary: false, value: false },
+                    { text: t('btn_ok'), primary: true, value: true }
+                ]
+            });
+        }
+        
+        // 步骤0：语言选择
+        function renderLanguageStep() {
+            updatePageLang();
+            const html = `
+                <h2 class="step-title">${t('step_lang_title')}</h2>
+                <p class="step-description">${t('step_lang_desc')}</p>
+                
+                <div class="language-selection">
+                    <div class="language-options">
+                        <div class="language-option selected" onclick="selectLanguage('zh-CN')">
+                            <input type="radio" name="language" value="zh-CN" id="lang-zh-CN" checked>
+                            <label for="lang-zh-CN">简体中文</label>
+                        </div>
+                        <div class="language-option" onclick="selectLanguage('en')">
+                            <input type="radio" name="language" value="en" id="lang-en">
+                            <label for="lang-en">English</label>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="btn-container">
+                    <button class="btn btn-primary" onclick="handleLanguageConfirm()">${t('btn_next')}</button>
+                </div>
+            `;
+            
+            document.getElementById('installContent').innerHTML = html;
+            selectLanguage('zh-CN');
+        }
+        
+        function selectLanguage(lang) {
+            document.querySelectorAll('.language-option').forEach(el => el.classList.remove('selected'));
+            const option = document.querySelector(`.language-option[onclick="selectLanguage('${lang}')"]`);
+            if (option) option.classList.add('selected');
+            document.getElementById(`lang-${lang}`).checked = true;
+        }
+        
+        function handleLanguageConfirm() {
+            const lang = document.querySelector('input[name="language"]:checked').value;
+            // 保存语言到安装配置（后续会随 create-admin 写入注册表）
+            let config = getInstallConfig();
+            if (!config) config = {};
+            config.language = lang;
+            saveInstallConfig(config);
+            setCurrentStep(InstallState.STEP_AGREEMENT);
+            showStatusAndAutoRefresh(t('status_language_selected'), InstallState.STEP_AGREEMENT);
+        }
+        
+        // 根据当前语言更新页面标题与头部
+        function updatePageLang() {
+            const lang = getCurrentLang();
+            document.documentElement.lang = lang === 'en' ? 'en' : 'zh-CN';
+            const L = InstallI18n[lang] || InstallI18n['zh-CN'];
+            const title = (L && L.page_title) ? L.page_title : 'ZerOS 系统安装';
+            const subtitle = (L && L.page_subtitle) ? L.page_subtitle : '欢迎安装 ZerOS 操作系统';
+            const loadingText = (L && L.loading_text) ? L.loading_text : '正在加载安装程序...';
+            document.title = title;
+            const titleEl = document.getElementById('installTitle');
+            const subtitleEl = document.getElementById('installSubtitle');
+            const loadingEl = document.getElementById('loadingText');
+            if (titleEl) titleEl.textContent = title;
+            if (subtitleEl) subtitleEl.textContent = subtitle;
+            if (loadingEl) loadingEl.textContent = loadingText;
+        }
+        
+        // 步骤1：协议确认
+        function renderAgreementStep() {
+            const html = `
+                <h2 class="step-title">${t('step_agreement_title')}</h2>
+                <p class="step-description">${t('step_agreement_desc')}</p>
+                
+                <div class="agreement-content">
+                    <h3>GNU通用公共许可证 (GPL v2)</h3>
+                    <p><strong>ZerOS 系统基于 GNU General Public License Version 2 发布。</strong></p>
+                    
+                    <h4>前言</h4>
+                    <p>大多数软件的许可证设计用于剥夺您共享和更改软件的自由。相比之下，GNU通用公共许可证旨在保证您共享和更改自由软件的自由——确保软件对所有用户都是自由的。本通用公共许可证适用于自由软件基金会的大部分软件以及作者承诺使用该许可证的任何其他程序。（自由软件基金会的某些其他软件由GNU Lesser通用公共许可证保护。）您也可以将本许可证应用于您的程序。</p>
+                    
+                    <p>当我们谈论自由软件时，我们指的是自由，而不是价格。我们的通用公共许可证旨在确保您拥有分发自由软件副本的自由（如果您愿意，可以为此服务收费），您可以收到源代码或可以根据需要获取它，您可以更改软件或在新的自由程序中使用其片段；并且您知道您可以做这些事情。</p>
+                    
+                    <p>为了保护您的权利，我们需要做出限制，禁止任何人否认您的这些权利或要求您放弃这些权利。如果您分发软件副本或修改软件，这些限制将转化为您的某些责任。</p>
+                    
+                    <p>例如，如果您分发此类程序的副本，无论是免费还是收费，您必须向收件人提供您拥有的所有权利。您必须确保他们也能收到或获取源代码。并且您必须向他们展示这些条款，以便他们了解自己的权利。</p>
+                    
+                    <p>我们通过两个步骤保护您的权利：（1）为软件设置版权，（2）向您提供本许可证，该许可证授予您合法复制、分发和/或修改软件的权利。</p>
+                    
+                    <p>另外，为了每个作者和我们自己的保护，我们希望确保每个人都理解此自由软件没有任何担保。如果软件被其他人修改并传递，我们希望其收件人知道他们拥有的不是原始版本，因此其他人引入的任何问题都不会影响原始作者的声音。</p>
+                    
+                    <h4>条款和条件</h4>
+                    
+                    <p><strong>0. 本许可证适用于任何程序或其他作品，其中包含版权所有者放置的通知，说明它可以根据本通用公共许可证的条款分发。下面的"程序"是指任何此类程序或作品，"基于程序的作品"是指程序或任何受版权法约束的衍生作品：即包含程序或其一部分的作品，无论是逐字复制还是经过修改和/或翻译成另一种语言。（在下文中，翻译被无限制地包含在"修改"一词中。）每个被许可人都被称为"您"。</strong></p>
+                    
+                    <p><strong>1. 您可以以任何介质复制和分发程序的逐字副本，前提是您在每份副本上明显且适当地发布适当的版权声明和免责声明；保留所有涉及本许可证和不提供任何担保的声明；并将本许可证的副本与程序一起提供给任何其他接收者。</strong></p>
+                    
+                    <p><strong>2. 您可以修改程序或其任何部分的副本，从而形成基于程序的作品，并根据上述第1条的条款复制和分发此类修改或作品，前提是您同时满足以下所有条件：</strong></p>
+                    <ul>
+                        <li><strong>a)</strong> 您必须使修改后的文件带有明显的声明，说明您更改了文件以及更改的日期。</li>
+                        <li><strong>b)</strong> 您必须使您分发或发布的任何作品，如果全部或部分包含或派生自程序或其任何部分，必须作为一个整体按照本许可证的条款向所有第三方免费许可。</li>
+                        <li><strong>c)</strong> 如果修改后的程序在运行时通常以交互方式读取命令，则必须使其在开始为这种交互使用运行时的最常见方式中打印或显示公告，包括适当的版权声明和没有担保的声明（或者，说明您提供担保），以及用户可以按照这些条件重新分发程序的声明，并告诉用户如何查看本许可证的副本。</li>
+                    </ul>
+                    
+                    <p><strong>11. 由于程序是免费许可的，在法律允许的范围内，不提供任何保证。除非另有书面说明，版权持有人和/或其他方按"原样"提供程序，不提供任何形式的明示或暗示的保证，包括但不限于对适销性和特定用途适用性的暗示保证。程序质量和性能的整个风险由您承担。如果程序存在缺陷，您将承担所有必要的服务、维修或更正的费用。</strong></p>
+                    
+                    <p><strong>12. 除非适用法律要求或书面同意，任何版权持有人或任何其他可能根据上述许可修改和/或重新分发程序的方，对您因使用或无法使用程序而造成的任何损害（包括但不限于数据丢失或数据不准确或您或第三方遭受的损失或程序无法与其他程序一起运行）不承担责任，即使此类持有人或其他方已被告知此类损害的可能性。</strong></p>
+                    
+                    <h3>系统要求</h3>
+                    <p>安装 ZerOS 系统需要满足以下要求：</p>
+                    <ul>
+                        <li><strong>必须</strong>具备 PHP 环境（PHP 7.0 或更高版本）<strong>或</strong> SpringBoot 环境（Java 8 或更高版本）</li>
+                        <li>PHP 环境需要启用 Zip 扩展</li>
+                        <li>足够的磁盘空间（建议至少 500MB 可用空间）</li>
+                        <li>现代浏览器（支持 ES6+）</li>
+                    </ul>
+                    
+                    <h3>安装须知</h3>
+                    <ul>
+                        <li>安装过程将创建系统文件和目录结构</li>
+                        <li>请确保您有足够的权限进行文件操作</li>
+                        <li>安装过程中请勿关闭浏览器或中断网络连接</li>
+                        <li>建议在安装前备份现有数据</li>
+                        <li>安装完成后，系统文件将被解压，之后需要重启服务器以确保所有服务正确加载</li>
+                        <li>重启服务器后，请重新访问安装页面继续完成安装流程</li>
+                    </ul>
+                </div>
+                
+                <div class="agreement-checkbox">
+                    <input type="checkbox" id="agreeCheckbox">
+                    <label for="agreeCheckbox">我已仔细阅读并完全理解上述 GNU General Public License Version 2 协议的所有条款和条件，了解系统要求和安装须知，并同意按照协议条款继续安装 ZerOS 系统。<br><span class="agreement-en">I have read and agree to the GPL v2 terms, system requirements and installation notes above, and agree to continue installing ZerOS.</span></label>
+                </div>
+                
+                <div class="btn-container">
+                    <button class="btn btn-secondary" onclick="handleBackFromAgreement()">${t('step_agreement_back')}</button>
+                    <button class="btn btn-primary" id="agreeBtn" disabled onclick="handleAgree()">${t('step_agreement_agree')}</button>
+                </div>
+            `;
+            
+            document.getElementById('installContent').innerHTML = html;
+            
+            // 监听复选框
+            const checkbox = document.getElementById('agreeCheckbox');
+            const agreeBtn = document.getElementById('agreeBtn');
+            checkbox.addEventListener('change', function() {
+                agreeBtn.disabled = !this.checked;
+            });
+        }
+        
+        function handleAgree() {
+            setCurrentStep(InstallState.STEP_ENV_SELECT);
+            showStatusAndAutoRefresh(t('status_agreement_accepted'), InstallState.STEP_ENV_SELECT);
+        }
+        
+        // 步骤2：环境选择
+        function renderEnvSelectStep() {
+            const html = `
+                <h2 class="step-title">${t('step_env_title')}</h2>
+                <p class="step-description">${t('step_env_desc')}</p>
+                
+                <div class="env-selection">
+                    <div class="env-options">
+                        <div class="env-option" onclick="selectEnv('php')">
+                            <input type="radio" name="env" value="php" id="env-php" checked>
+                            <label for="env-php">${t('step_env_php')}</label>
+                        </div>
+                        <div class="env-option" onclick="selectEnv('springboot')">
+                            <input type="radio" name="env" value="springboot" id="env-springboot">
+                            <label for="env-springboot">${t('step_env_springboot')}</label>
+                        </div>
+                    </div>
+                    
+                    <div class="env-port-input">
+                        <label>${t('step_env_port')}</label>
+                        <input type="number" id="portInput" value="8089" min="1" max="65535">
+                    </div>
+                </div>
+                
+                <div class="btn-container">
+                    <button class="btn btn-secondary" onclick="handleBack()">${t('btn_back')}</button>
+                    <button class="btn btn-primary" onclick="handleEnvConfirm()">${t('btn_next')}</button>
+                </div>
+            `;
+            
+            document.getElementById('installContent').innerHTML = html;
+            selectEnv('php'); // 默认选择PHP
+        }
+        
+        function selectEnv(env) {
+            document.querySelectorAll('.env-option').forEach(el => el.classList.remove('selected'));
+            const option = document.querySelector(`.env-option[onclick="selectEnv('${env}')"]`);
+            if (option) option.classList.add('selected');
+            document.getElementById(`env-${env}`).checked = true;
+        }
+        
+        async function handleEnvConfirm() {
+            const env = document.querySelector('input[name="env"]:checked').value;
+            const port = parseInt(document.getElementById('portInput').value);
+            
+            if (!port || port < 1 || port > 65535) {
+                await showAlert(t('error_port_invalid'), t('error_input'), 'warning');
+                return;
+            }
+            
+            // 保存配置
+            saveInstallConfig({ env, port });
+            
+            // 验证环境
+            const baseUrl = `${window.location.protocol}//${window.location.hostname}:${port}`;
+            
+            // 根据环境类型选择不同的检测URL
+            let testUrl;
+            if (env === 'php') {
+                // PHP环境：检测安装目录下的test.php文件
+                testUrl = `test.php`;
+            } else {
+                // SpringBoot环境：检测/test/目录（系统文件解压后会有）
+                testUrl = `${baseUrl}/test/`;
+            }
+            
+            try {
+                const response = await fetch(testUrl, { method: env === 'php' ? 'GET' : 'HEAD' });
+                if (response.ok) {
+                    // PHP环境需要验证返回的JSON格式
+                    if (env === 'php') {
+                        const data = await response.json();
+                        if (data.status === 'success') {
+                            // 环境验证通过，重新加载
+                            setCurrentStep(InstallState.STEP_EXTRACT);
+                            showStatusAndAutoRefresh(t('status_env_ok'), InstallState.STEP_EXTRACT);
+                            return;
+                        } else {
+                            throw new Error('PHP服务响应异常');
+                        }
+                    } else {
+                        setCurrentStep(InstallState.STEP_EXTRACT);
+                        showStatusAndAutoRefresh(t('status_env_ok'), InstallState.STEP_EXTRACT);
+                        return;
+                    }
+                } else {
+                    throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+                }
+            } catch (error) {
+                await showAlert(`无法连接到 ${testUrl}\n请确保${env === 'php' ? 'PHP' : 'SpringBoot'}服务正在运行，并且端口配置正确。\n\nCannot connect. Ensure ${env === 'php' ? 'PHP' : 'SpringBoot'} is running and port is correct.\n\nError: ${error.message}`, t('error_connect_failed'), 'error');
+            }
+        }
+        
+        function handleBack() {
+            setCurrentStep(InstallState.STEP_ENV_SELECT);
+            renderEnvSelectStep();
+        }
+        
+        function handleBackFromAgreement() {
+            setCurrentStep(InstallState.STEP_LANGUAGE);
+            renderLanguageStep();
+        }
+        
+        // 步骤3：解压文件
+        async function renderExtractStep() {
+            const config = getInstallConfig();
+            if (!config) {
+                setCurrentStep(InstallState.STEP_ENV_SELECT);
+                location.reload();
+                return;
+            }
+            
+            const extractUrl = 'install-extract.php';
+            
+            const html = `
+                <h2 class="step-title">${t('step_extract_title')}</h2>
+                <p class="step-description">${t('step_extract_desc')}</p>
+                
+                <div class="progress-container">
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="progressFill" style="width: 0%">0%</div>
+                    </div>
+                    <div class="progress-text" id="progressText">${t('step_extract_prepare')}</div>
+                </div>
+                
+                <div class="progress-status" id="progressStatus"></div>
+                
+                <div class="btn-container" id="extractBtnContainer" style="display: none;">
+                    <button class="btn btn-secondary" onclick="location.reload()">${t('btn_reload')}</button>
+                </div>
+            `;
+            
+            document.getElementById('installContent').innerHTML = html;
+            
+            // 开始解压
+            const steps = [
+                { name: 'system-core.zip', action: 'extract-core', progress: 25 },
+                { name: 'system-libs.zip', action: 'extract-libs', progress: 50 },
+                { name: 'system-arch.zip', action: 'extract-arch', progress: 75 },
+                { name: 'system-apps.zip', action: 'extract-apps', progress: 100 }
+            ];
+            
+            const statusDiv = document.getElementById('progressStatus');
+            let currentProgress = 0;
+            
+            for (let i = 0; i < steps.length; i++) {
+                const step = steps[i];
+                addStatus(`${t('status_extract_doing')} ${step.name}...`, 'info');
+                updateProgress(step.progress - 10);
+                
+                try {
+                    // 人工减速，确保动画流畅
+                    await sleep(300);
+                    
+                    const result = await apiCall(`${extractUrl}?action=${step.action}`);
+                    
+                    await sleep(500); // 人工减速
+                    
+                    if (result.status === 'success') {
+                        addStatus(`${step.name} ${t('status_extract_ok')}`, 'success');
+                        updateProgress(step.progress);
+                    } else {
+                        addStatus(`${step.name} ${t('status_extract_fail')}: ${result.message}`, 'error');
+                        throw new Error(result.message);
+                    }
+                } catch (error) {
+                    addStatus(`${t('status_extract_fail')}: ${error.message}`, 'error');
+                    await showAlert(`解压 ${step.name} 时发生错误：${error.message}\n\nExtract error: ${error.message}`, t('error_extract_failed'), 'error');
+                    return;
+                }
+            }
+            
+            addStatus(t('status_all_extracted'), 'success');
+            updateProgress(100);
+            
+            await sleep(500);
+            addStatus(t('status_verifying'), 'info');
+            await sleep(500);
+            addStatus(t('status_integrity_ok'), 'success');
+            
+            await sleep(1000);
+            addStatus('', 'info');
+            addStatus(t('status_extract_done'), 'success');
+            addStatus('1. ' + t('status_restart_1'), 'info');
+            addStatus('2. ' + t('status_restart_2'), 'info');
+            addStatus('3. ' + t('status_restart_3'), 'info');
+            
+            const restartHtml = `
+                <div style="background: #faf9f8; border: 1px solid #edebe9; border-radius: 4px; padding: 20px; margin-top: 20px;">
+                    <h3 style="color: #323130; margin-bottom: 15px; font-weight: 600;">${t('step_complete_next')}</h3>
+                    <ol style="color: #323130; line-height: 1.8; margin-left: 20px;">
+                        <li>${t('status_restart_1')}</li>
+                        <li>${t('status_restart_2')}</li>
+                        <li>${t('status_restart_3')}</li>
+                    </ol>
+                    <p style="color: #605e5c; margin-top: 15px; font-size: 13px;">
+                        ${t('notice_after_restart')}
+                    </p>
+                </div>
+            `;
+            statusDiv.insertAdjacentHTML('beforeend', restartHtml);
+            
+            document.getElementById('extractBtnContainer').style.display = 'flex';
+            document.getElementById('extractBtnContainer').innerHTML = `
+                <button class="btn btn-primary" onclick="setCurrentStep('${InstallState.STEP_DISK_INIT}'); location.reload();">${t('btn_after_restart')}</button>
+            `;
+            
+            function addStatus(message, type = 'info') {
+                const item = document.createElement('div');
+                item.className = `status-item ${type}`;
+                item.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+                statusDiv.appendChild(item);
+                statusDiv.scrollTop = statusDiv.scrollHeight;
+            }
+            
+            function updateProgress(percent) {
+                const fill = document.getElementById('progressFill');
+                const text = document.getElementById('progressText');
+                fill.style.width = percent + '%';
+                fill.textContent = percent + '%';
+                text.textContent = `${t('step_extract_progress')} ${percent}%`;
+            }
+        }
+        
+        function sleep(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+        
+        // 步骤4：磁盘初始化
+        async function renderDiskInitStep() {
+            const config = getInstallConfig();
+            const baseUrl = `${window.location.protocol}//${window.location.hostname}:${config.port}`;
+            
+            // 总磁盘大小：5GB，系统盘D：2GB固定
+            const totalSize = 5 * 1024 * 1024 * 1024;
+            const systemSize = 2 * 1024 * 1024 * 1024;
+            const availableSize = totalSize - systemSize; // 3GB
+            
+            let partitions = {
+                'D:': systemSize  // 系统盘固定2GB
+            };
+            
+            // 尝试从DiskData.json读取现有分区
+            try {
+                const diskDataUrl = `${baseUrl}/system/service/DISK/D/DiskData.json`;
+                const response = await fetch(diskDataUrl);
+                if (response.ok) {
+                    const diskData = await response.json();
+                    if (diskData.partitions) {
+                        partitions = diskData.partitions;
+                    }
+                }
+            } catch (e) {
+                // 如果无法读取，使用默认值
+            }
+            
+            // 计算已分配空间
+            let allocated = 0;
+            Object.values(partitions).forEach(size => allocated += size);
+            let remaining = totalSize - allocated;
+            
+            // 生成分区选项HTML
+            function genPartOptions(parts) {
+                const used = Object.keys(parts || {}).map(k => k.charAt(0));
+                let options = '';
+                for (let i = 0; i < 26; i++) {
+                    const letter = String.fromCharCode(65 + i);
+                    if (!used.includes(letter)) {
+                        options += `<option value="${letter}:">${letter}:</option>`;
+                    }
+                }
+                return options;
+            }
+            
+            const partitionOptionsHtml = genPartOptions(partitions);
+            
+            const html = `
+                <h2 class="step-title">${t('step_disk_title')}</h2>
+                <p class="step-description">${t('step_disk_desc')}</p>
+                
+                <div class="partition-manager">
+                    <div class="partition-info">
+                        <div><strong>${t('step_disk_total')}</strong>${formatBytes(totalSize)}</div>
+                        <div><strong>${t('step_disk_system')}</strong>${formatBytes(systemSize)} ${t('step_disk_fixed')}</div>
+                        <div><strong>${t('step_disk_available')}</strong>${formatBytes(remaining)}</div>
+                    </div>
+                    
+                    <div class="partition-list" id="partitionList"></div>
+                    
+                    <div class="add-partition-section">
+                        <h4 style="color: #323130; margin-bottom: 15px; font-weight: 600;">${t('step_disk_add')}</h4>
+                        <div class="add-partition-form">
+                            <div class="form-group">
+                                <label>${t('step_disk_name')}</label>
+                                <select id="newPartitionName">
+                                    ${partitionOptionsHtml}
+                                </select>
+                            </div>
+                            <div class="form-group">
+                                <label>${t('step_disk_size')}</label>
+                                <input type="text" id="newPartitionSize" placeholder="${t('step_disk_placeholder')}">
+                            </div>
+                            <div class="form-group">
+                                <button class="btn btn-primary btn-small" onclick="addPartition()">${t('step_disk_add')}</button>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+                
+                <div class="btn-container">
+                    <button class="btn btn-secondary" onclick="location.reload()">${t('btn_reload')}</button>
+                    <button class="btn btn-primary" onclick="handleDiskConfirm()">${t('step_disk_confirm')}</button>
+                </div>
+            `;
+            
+            document.getElementById('installContent').innerHTML = html;
+            window.partitions = partitions;
+            window.totalSize = totalSize;
+            window.systemSize = systemSize;
+            renderPartitions();
+            
+            function generatePartitionOptions(existingPartitions) {
+                const used = Object.keys(existingPartitions).map(k => k.charAt(0));
+                let options = '';
+                for (let i = 0; i < 26; i++) {
+                    const letter = String.fromCharCode(65 + i); // A-Z
+                    if (!used.includes(letter)) {
+                        options += `<option value="${letter}:">${letter}:</option>`;
+                    }
+                }
+                return options;
+            }
+            
+            function renderPartitions() {
+                const list = document.getElementById('partitionList');
+                list.innerHTML = '';
+                
+                Object.entries(window.partitions).forEach(([name, size]) => {
+                    const isSystem = name === 'D:';
+                    const item = document.createElement('div');
+                    item.className = `partition-item ${isSystem ? 'system' : ''}`;
+                    item.innerHTML = `
+                        <div class="partition-name">${name}</div>
+                        <div class="partition-size">
+                            <input type="text" value="${formatBytes(size)}" 
+                                   ${isSystem ? 'disabled' : ''} 
+                                   data-partition="${name}"
+                                   onchange="updatePartitionSize('${name}', this.value)">
+                            <span class="partition-size-label">${isSystem ? t('step_disk_system_label') : ''}</span>
+                        </div>
+                        ${!isSystem ? `<div class="partition-actions">
+                            <button class="btn btn-danger btn-small" onclick="removePartition('${name}')">${t('step_disk_delete')}</button>
+                        </div>` : ''}
+                    `;
+                    list.appendChild(item);
+                });
+            }
+            
+            window.renderPartitions = renderPartitions;
+        }
+        
+        function generatePartitionOptions(existingPartitions) {
+            const used = Object.keys(existingPartitions).map(k => k.charAt(0));
+            let options = '';
+            for (let i = 0; i < 26; i++) {
+                const letter = String.fromCharCode(65 + i);
+                if (!used.includes(letter)) {
+                    options += `<option value="${letter}:">${letter}:</option>`;
+                }
+            }
+            return options;
+        }
+        
+        // 为分区选择下拉框生成选项的全局函数
+        function generatePartitionOptionsForSelect(existingPartitions) {
+            return generatePartitionOptions(existingPartitions);
+        }
+        
+        // 分区创建状态标志
+        let isAddingPartition = false;
+        
+        async function addPartition() {
+            // 防止重复点击
+            if (isAddingPartition) {
+                return;
+            }
+            
+            const name = document.getElementById('newPartitionName').value;
+            const sizeStr = document.getElementById('newPartitionSize').value;
+            
+            if (!name || !sizeStr) {
+                await showAlert(t('error_partition_info'), t('error_input'), 'warning');
+                return;
+            }
+            
+            const size = parseBytes(sizeStr);
+            if (!size || size <= 0) {
+                await showAlert(t('error_partition_size'), t('error_input'), 'warning');
+                return;
+            }
+            
+            let allocated = 0;
+            Object.values(window.partitions).forEach(s => allocated += s);
+            
+            if (allocated + size > window.totalSize) {
+                await showAlert(`${t('error_partition_total')} ${formatBytes(window.totalSize)}.`, t('error_input'), 'warning');
+                return;
+            }
+            
+            // 设置处理中标志
+            isAddingPartition = true;
+            
+            // 禁用按钮并显示加载状态
+            const addBtn = document.querySelector('.add-partition-form button');
+            const originalText = addBtn ? addBtn.textContent : '';
+            if (addBtn) {
+                addBtn.disabled = true;
+                addBtn.textContent = t('btn_adding');
+                addBtn.style.opacity = '0.6';
+                addBtn.style.cursor = 'not-allowed';
+            }
+            
+            // 模拟网络延迟（实际是本地操作，但保持一致性）
+            setTimeout(() => {
+                try {
+                    window.partitions[name] = size;
+                    window.renderPartitions();
+                    
+                    // 重新生成分区选项
+                    const select = document.getElementById('newPartitionName');
+                    select.innerHTML = generatePartitionOptionsForSelect(window.partitions);
+                    document.getElementById('newPartitionSize').value = '';
+                } finally {
+                    // 恢复按钮状态
+                    isAddingPartition = false;
+                    if (addBtn) {
+                        addBtn.disabled = false;
+                        addBtn.textContent = originalText;
+                        addBtn.style.opacity = '1';
+                        addBtn.style.cursor = 'pointer';
+                    }
+                }
+            }, 300); // 短暂延迟，确保UI更新
+        }
+        
+        async function updatePartitionSize(name, sizeStr) {
+            const size = parseBytes(sizeStr);
+            if (!size || size <= 0) {
+                await showAlert(t('error_partition_size_invalid'), t('error_input'), 'warning');
+                window.renderPartitions();
+                return;
+            }
+            
+            let allocated = 0;
+            Object.entries(window.partitions).forEach(([n, s]) => {
+                if (n !== name) allocated += s;
+            });
+            
+            if (allocated + size > window.totalSize) {
+                await showAlert(`${t('error_partition_total')} ${formatBytes(window.totalSize)}.`, t('error_input'), 'warning');
+                window.renderPartitions();
+                return;
+            }
+            
+            window.partitions[name] = size;
+        }
+        
+        async function removePartition(name) {
+            const confirmed = await showConfirm(`${t('confirm_remove_partition')} ${name} ${t('confirm_remove_suffix')}`, t('confirm_title'));
+            if (confirmed) {
+                delete window.partitions[name];
+                window.renderPartitions();
+                
+                // 重新生成分区选项
+                const select = document.getElementById('newPartitionName');
+                select.innerHTML = generatePartitionOptionsForSelect(window.partitions);
+            }
+        }
+        
+        // 磁盘确认状态标志
+        let isConfirmingDisk = false;
+        
+        async function handleDiskConfirm() {
+            // 防止重复点击
+            if (isConfirmingDisk) {
+                return;
+            }
+            
+            const config = getInstallConfig();
+            const baseUrl = `${window.location.protocol}//${window.location.hostname}:${config.port}`;
+            const serviceUrl = 'install-service.php';
+            
+            // 设置处理中标志
+            isConfirmingDisk = true;
+            
+            // 禁用按钮并显示加载状态
+            const confirmBtn = document.querySelector('.btn-container .btn-primary');
+            const originalText = confirmBtn ? confirmBtn.textContent : '';
+            if (confirmBtn) {
+                confirmBtn.disabled = true;
+                confirmBtn.textContent = t('btn_initializing_disk');
+                confirmBtn.style.opacity = '0.6';
+                confirmBtn.style.cursor = 'not-allowed';
+            }
+            
+            try {
+                const result = await apiCall(serviceUrl, {
+                    action: 'sync-disk',
+                    partitions: window.partitions
+                });
+                
+                if (result.status === 'success') {
+                    setCurrentStep(InstallState.STEP_USER_SETUP);
+                    showStatusAndAutoRefresh(t('status_disk_ok'), InstallState.STEP_USER_SETUP);
+                } else {
+                    await showAlert(`磁盘初始化失败：${result.message} / Disk init failed: ${result.message}`, t('error_disk_init_failed'), 'error');
+                    // 恢复按钮状态
+                    isConfirmingDisk = false;
+                    if (confirmBtn) {
+                        confirmBtn.disabled = false;
+                        confirmBtn.textContent = originalText;
+                        confirmBtn.style.opacity = '1';
+                        confirmBtn.style.cursor = 'pointer';
+                    }
+                }
+            } catch (error) {
+                await showAlert(`磁盘初始化失败：${error.message} / Disk init failed: ${error.message}`, t('error_disk_init_failed'), 'error');
+                isConfirmingDisk = false;
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = originalText;
+                    confirmBtn.style.opacity = '1';
+                    confirmBtn.style.cursor = 'pointer';
+                }
+            }
+        }
+        
+        // MD5加密函数（与CryptDrive._md5Hash完全一致）
+        function md5Hash(data) {
+            // MD5 算法实现
+            function md5cycle(x, k) {
+                let a = x[0], b = x[1], c = x[2], d = x[3];
+                
+                a = ff(a, b, c, d, k[0], 7, -680876936);
+                d = ff(d, a, b, c, k[1], 12, -389564586);
+                c = ff(c, d, a, b, k[2], 17, 606105819);
+                b = ff(b, c, d, a, k[3], 22, -1044525330);
+                a = ff(a, b, c, d, k[4], 7, -176418897);
+                d = ff(d, a, b, c, k[5], 12, 1200080426);
+                c = ff(c, d, a, b, k[6], 17, -1473231341);
+                b = ff(b, c, d, a, k[7], 22, -45705983);
+                a = ff(a, b, c, d, k[8], 7, 1770035416);
+                d = ff(d, a, b, c, k[9], 12, -1958414417);
+                c = ff(c, d, a, b, k[10], 17, -42063);
+                b = ff(b, c, d, a, k[11], 22, -1990404162);
+                a = ff(a, b, c, d, k[12], 7, 1804603682);
+                d = ff(d, a, b, c, k[13], 12, -40341101);
+                c = ff(c, d, a, b, k[14], 17, -1502002290);
+                b = ff(b, c, d, a, k[15], 22, 1236535329);
+                
+                a = gg(a, b, c, d, k[1], 5, -165796510);
+                d = gg(d, a, b, c, k[6], 9, -1069501632);
+                c = gg(c, d, a, b, k[11], 14, 643717713);
+                b = gg(b, c, d, a, k[0], 20, -373897302);
+                a = gg(a, b, c, d, k[5], 5, -701558691);
+                d = gg(d, a, b, c, k[10], 9, 38016083);
+                c = gg(c, d, a, b, k[15], 14, -660478335);
+                b = gg(b, c, d, a, k[4], 20, -405537848);
+                a = gg(a, b, c, d, k[9], 5, 568446438);
+                d = gg(d, a, b, c, k[14], 9, -1019803690);
+                c = gg(c, d, a, b, k[3], 14, -187363961);
+                b = gg(b, c, d, a, k[8], 20, 1163531501);
+                a = gg(a, b, c, d, k[13], 5, -1444681467);
+                d = gg(d, a, b, c, k[2], 9, -51403784);
+                c = gg(c, d, a, b, k[7], 14, 1735328473);
+                b = gg(b, c, d, a, k[12], 20, -1926607734);
+                
+                a = hh(a, b, c, d, k[5], 4, -378558);
+                d = hh(d, a, b, c, k[8], 11, -2022574463);
+                c = hh(c, d, a, b, k[11], 16, 1839030562);
+                b = hh(b, c, d, a, k[14], 23, -35309556);
+                a = hh(a, b, c, d, k[1], 4, -1530992060);
+                d = hh(d, a, b, c, k[4], 11, 1272893353);
+                c = hh(c, d, a, b, k[7], 16, -155497632);
+                b = hh(b, c, d, a, k[10], 23, -1094730640);
+                a = hh(a, b, c, d, k[13], 4, 681279174);
+                d = hh(d, a, b, c, k[0], 11, -358537222);
+                c = hh(c, d, a, b, k[3], 16, -722521979);
+                b = hh(b, c, d, a, k[6], 23, 76029189);
+                a = hh(a, b, c, d, k[9], 4, -640364487);
+                d = hh(d, a, b, c, k[12], 11, -421815835);
+                c = hh(c, d, a, b, k[15], 16, 530742520);
+                b = hh(b, c, d, a, k[2], 23, -995338651);
+                
+                a = ii(a, b, c, d, k[0], 6, -198630844);
+                d = ii(d, a, b, c, k[7], 10, 1126891415);
+                c = ii(c, d, a, b, k[14], 15, -1416354905);
+                b = ii(b, c, d, a, k[5], 21, -57434055);
+                a = ii(a, b, c, d, k[12], 6, 1700485571);
+                d = ii(d, a, b, c, k[3], 10, -1894986606);
+                c = ii(c, d, a, b, k[10], 15, -1051523);
+                b = ii(b, c, d, a, k[1], 21, -2054922799);
+                a = ii(a, b, c, d, k[8], 6, 1873313359);
+                d = ii(d, a, b, c, k[15], 10, -30611744);
+                c = ii(c, d, a, b, k[6], 15, -1560198380);
+                b = ii(b, c, d, a, k[13], 21, 1309151649);
+                a = ii(a, b, c, d, k[4], 6, -145523070);
+                d = ii(d, a, b, c, k[11], 10, -1120210379);
+                c = ii(c, d, a, b, k[2], 15, 718787259);
+                b = ii(b, c, d, a, k[9], 21, -343485551);
+                
+                x[0] = add32(a, x[0]);
+                x[1] = add32(b, x[1]);
+                x[2] = add32(c, x[2]);
+                x[3] = add32(d, x[3]);
+            }
+            
+            function cmn(q, a, b, x, s, t) {
+                a = add32(add32(a, q), add32(x, t));
+                return add32((a << s) | (a >>> (32 - s)), b);
+            }
+            
+            function ff(a, b, c, d, x, s, t) {
+                return cmn((b & c) | ((~b) & d), a, b, x, s, t);
+            }
+            
+            function gg(a, b, c, d, x, s, t) {
+                return cmn((b & d) | (c & (~d)), a, b, x, s, t);
+            }
+            
+            function hh(a, b, c, d, x, s, t) {
+                return cmn(b ^ c ^ d, a, b, x, s, t);
+            }
+            
+            function ii(a, b, c, d, x, s, t) {
+                return cmn(c ^ (b | (~d)), a, b, x, s, t);
+            }
+            
+            function add32(a, b) {
+                return (a + b) & 0xFFFFFFFF;
+            }
+            
+            function rhex(n) {
+                let s = '';
+                const hexChr = '0123456789abcdef';
+                for (let i = 0; i < 4; i++) {
+                    s += hexChr.charAt((n >> (i * 8 + 4)) & 0x0F) + hexChr.charAt((n >> (i * 8)) & 0x0F);
+                }
+                return s;
+            }
+            
+            function hex(x) {
+                const result = [];
+                for (let i = 0; i < x.length; i++) {
+                    result.push(rhex(x[i]));
+                }
+                return result.join('');
+            }
+            
+            // 转换为 UTF-8 字节数组
+            const utf8 = unescape(encodeURIComponent(data));
+            const bytes = [];
+            for (let i = 0; i < utf8.length; i++) {
+                bytes.push(utf8.charCodeAt(i));
+            }
+            
+            // 填充
+            const len = bytes.length;
+            bytes.push(0x80);
+            while (bytes.length % 64 !== 56) {
+                bytes.push(0);
+            }
+            
+            // 添加长度（64位，小端序）
+            const bitLen = len * 8;
+            for (let i = 0; i < 8; i++) {
+                bytes.push((bitLen >>> (i * 8)) & 0xFF);
+            }
+            
+            // 初始化 MD5 缓冲区
+            let h = [1732584193, -271733879, -1732584194, 271733878];
+            
+            // 处理每个 512 位块
+            for (let i = 0; i < bytes.length; i += 64) {
+                const chunk = [];
+                for (let j = 0; j < 16; j++) {
+                    chunk[j] = bytes[i + j * 4] | (bytes[i + j * 4 + 1] << 8) | 
+                              (bytes[i + j * 4 + 2] << 16) | (bytes[i + j * 4 + 3] << 24);
+                }
+                md5cycle(h, chunk);
+            }
+            
+            return hex(h);
+        }
+        
+        // 步骤5：用户设置
+        function renderUserSetupStep() {
+            const html = `
+                <h2 class="step-title">${t('step_user_title')}</h2>
+                <p class="step-description">${t('step_user_desc')}</p>
+                
+                <div class="user-form">
+                    <div class="form-group">
+                        <label>${t('step_user_username')}</label>
+                        <input type="text" id="usernameInput" placeholder="${t('step_user_username_placeholder')}">
+                        <div class="form-hint">${t('step_user_username_hint')}</div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>${t('step_user_password')}</label>
+                        <input type="password" id="passwordInput" placeholder="${t('step_user_password_placeholder')}">
+                        <div class="form-hint">${t('step_user_password_hint')}</div>
+                    </div>
+                    
+                    <div class="form-group">
+                        <label>${t('step_user_confirm_pwd')}</label>
+                        <input type="password" id="passwordConfirmInput" placeholder="${t('step_user_confirm_placeholder')}">
+                    </div>
+                </div>
+                
+                <div class="btn-container">
+                    <button class="btn btn-secondary" onclick="location.reload()">${t('btn_reload')}</button>
+                    <button class="btn btn-primary" onclick="handleUserConfirm()">${t('btn_next')}</button>
+                </div>
+            `;
+            
+            document.getElementById('installContent').innerHTML = html;
+        }
+        
+        // 用户创建状态标志
+        let isCreatingUser = false;
+        
+        async function handleUserConfirm() {
+            // 防止重复点击
+            if (isCreatingUser) {
+                return;
+            }
+            
+            const username = document.getElementById('usernameInput').value.trim();
+            const password = document.getElementById('passwordInput').value;
+            const passwordConfirm = document.getElementById('passwordConfirmInput').value;
+            
+            if (!username || !/^[a-zA-Z][a-zA-Z0-9_]*$/.test(username)) {
+                await showAlert(t('error_username_invalid'), t('error_input'), 'warning');
+                return;
+            }
+            
+            if (!password) {
+                await showAlert(t('error_password_required'), t('error_input'), 'warning');
+                return;
+            }
+            
+            if (password !== passwordConfirm) {
+                await showAlert(t('error_password_mismatch'), t('error_input'), 'warning');
+                return;
+            }
+            
+            const config = getInstallConfig();
+            const baseUrl = `${window.location.protocol}//${window.location.hostname}:${config.port}`;
+            const serviceUrl = 'install-service.php';
+            const language = (config && config.language) ? config.language : 'zh-CN';
+            
+            // 设置处理中标志
+            isCreatingUser = true;
+            
+            // 禁用按钮并显示加载状态
+            const confirmBtn = document.querySelector('.btn-container .btn-primary');
+            const originalText = confirmBtn ? confirmBtn.textContent : '';
+            if (confirmBtn) {
+                confirmBtn.disabled = true;
+                confirmBtn.textContent = t('btn_creating_user');
+                confirmBtn.style.opacity = '0.6';
+                confirmBtn.style.cursor = 'not-allowed';
+            }
+            
+            // 在JS端对密码进行MD5加密（与CryptDrive._md5Hash逻辑100%一致）
+            const passwordMd5 = md5Hash(password);
+            
+            try {
+                const result = await apiCall(serviceUrl, {
+                    action: 'create-admin',
+                    username: username,
+                    password: passwordMd5,
+                    language: language
+                });
+                
+                if (result.status === 'success') {
+                    setCurrentStep(InstallState.STEP_COMPLETE);
+                    showStatusAndAutoRefresh(t('status_user_created'), InstallState.STEP_COMPLETE);
+                } else {
+                    await showAlert(`用户创建失败：${result.message} / User creation failed: ${result.message}`, t('error_user_create_failed'), 'error');
+                    // 恢复按钮状态
+                    isCreatingUser = false;
+                    if (confirmBtn) {
+                        confirmBtn.disabled = false;
+                        confirmBtn.textContent = originalText;
+                        confirmBtn.style.opacity = '1';
+                        confirmBtn.style.cursor = 'pointer';
+                    }
+                }
+            } catch (error) {
+                await showAlert(`用户创建失败：${error.message} / User creation failed: ${error.message}`, t('error_user_create_failed'), 'error');
+                // 恢复按钮状态
+                isCreatingUser = false;
+                if (confirmBtn) {
+                    confirmBtn.disabled = false;
+                    confirmBtn.textContent = originalText;
+                    confirmBtn.style.opacity = '1';
+                    confirmBtn.style.cursor = 'pointer';
+                }
+            }
+        }
+        
+        // 步骤6：完成安装
+        async function renderCompleteStep() {
+            const config = getInstallConfig();
+            const baseUrl = `${window.location.protocol}//${window.location.hostname}:${config.port}`;
+            const serviceUrl = 'install-service.php';
+            
+            const html = `
+                <div class="completion-message">
+                    <div class="completion-icon">✓</div>
+                    <h2 class="completion-title">${t('step_complete_title')}</h2>
+                    <p class="completion-description">
+                        ${t('step_complete_desc')}
+                    </p>
+                    
+                    <div class="completion-info">
+                        <h4>${t('step_complete_next')}</h4>
+                        <p>${t('step_complete_1')}</p>
+                        <p>${t('step_complete_2')}</p>
+                        <p style="margin-left: 20px; color: #0078d4; font-weight: 600;">
+                            ${baseUrl}/test/index.html
+                        </p>
+                        <p>${t('step_complete_3')}</p>
+                    </div>
+                    
+                    <div class="btn-container">
+                        <button class="btn btn-primary" id="finishBtn" onclick="handleFinishInstall('${baseUrl}', '${serviceUrl}')">${t('step_finish_btn')}</button>
+                    </div>
+                </div>
+            `;
+            
+            document.getElementById('installContent').innerHTML = html;
+        }
+        
+        async function handleFinishInstall(baseUrl, serviceUrl) {
+            const btn = document.getElementById('finishBtn');
+            if (btn) {
+                btn.disabled = true;
+                btn.textContent = t('btn_cleaning');
+            }
+            
+            // 清理安装文件
+            try {
+                const result = await apiCall(serviceUrl, {
+                    action: 'cleanup'
+                });
+                console.log('清理结果：', result);
+                
+                // 清理完成后，清除本地存储并跳转
+                clearInstallData();
+                
+                // 延迟一下，确保用户看到清理完成
+                if (btn) {
+                    btn.textContent = t('btn_done_redirect');
+                }
+                setTimeout(() => {
+                    location.href = baseUrl + '/test/index.html';
+                }, 500);
+            } catch (error) {
+                console.error('清理失败：', error);
+                // 即使清理失败，也清除本地存储并跳转
+                clearInstallData();
+                if (btn) {
+                    btn.textContent = t('btn_cleanup_failed_redirect');
+                }
+                await showAlert('清理安装文件时出现错误，但安装已完成。您可以稍后手动删除安装目录。\n\nCleanup had errors but installation is complete. You may delete the setup folder later.\n\n正在跳转到系统... / Redirecting...', t('warning_title'), 'warning');
+                setTimeout(() => {
+                    location.href = baseUrl + '/test/index.html';
+                }, 1000);
+            }
+        }
+        
+        // 显示状态并自动刷新到下一步
+        function showStatusAndAutoRefresh(statusText, nextStep, delay = 5000) {
+            // 隐藏按钮容器
+            const btnContainer = document.querySelector('.btn-container');
+            if (btnContainer) {
+                btnContainer.style.display = 'none';
+            }
+            
+            // 显示状态提示（按当前语言）
+            let countdown = delay / 1000;
+            const hintHtml = `
+                <div class="auto-next-hint">
+                    ${statusText} <span class="countdown">${countdown}</span>${t('countdown_suffix')}
+                </div>
+            `;
+            const contentDiv = document.getElementById('installContent');
+            
+            // 移除旧的提示（如果存在）
+            const oldHint = document.getElementById('autoNextHint');
+            if (oldHint) {
+                oldHint.remove();
+            }
+            
+            const hintDiv = document.createElement('div');
+            hintDiv.id = 'autoNextHint';
+            hintDiv.innerHTML = hintHtml;
+            contentDiv.appendChild(hintDiv);
+            
+            // 滚动到提示区域
+            hintDiv.scrollIntoView({ behavior: 'smooth', block: 'center' });
+            
+            // 更新倒计时
+            const countdownInterval = setInterval(() => {
+                countdown--;
+                const countdownEl = document.querySelector('.countdown');
+                if (countdownEl) {
+                    countdownEl.textContent = countdown;
+                }
+                if (countdown <= 0) {
+                    clearInterval(countdownInterval);
+                    location.reload();
+                }
+            }, 1000);
+        }
+        
+        // 主函数：根据当前步骤渲染相应界面
+        function init() {
+            updatePageLang();
+            // 显示加载动画
+            const loadingScreen = document.getElementById('loadingScreen');
+            if (loadingScreen) {
+                // 显示加载动画3秒
+                setTimeout(() => {
+                    loadingScreen.classList.add('hidden');
+                    setTimeout(() => {
+                        loadingScreen.style.display = 'none';
+                        renderStep();
+                    }, 500);
+                }, 3000);
+            } else {
+                renderStep();
+            }
+        }
+        
+        function renderStep() {
+            updatePageLang();
+            const step = getCurrentStep();
+            
+            switch (step) {
+                case InstallState.STEP_LANGUAGE:
+                    renderLanguageStep();
+                    break;
+                case InstallState.STEP_AGREEMENT:
+                    renderAgreementStep();
+                    break;
+                case InstallState.STEP_ENV_SELECT:
+                    renderEnvSelectStep();
+                    break;
+                case InstallState.STEP_EXTRACT:
+                    renderExtractStep();
+                    break;
+                case InstallState.STEP_DISK_INIT:
+                    renderDiskInitStep();
+                    break;
+                case InstallState.STEP_USER_SETUP:
+                    renderUserSetupStep();
+                    break;
+                case InstallState.STEP_COMPLETE:
+                    renderCompleteStep();
+                    break;
+                default:
+                    renderLanguageStep();
+                    break;
+            }
+        }
+        
+        // 页面加载时初始化
+        window.addEventListener('DOMContentLoaded', init);
+    </script>
+</body>
+</html>
+
